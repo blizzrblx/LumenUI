@@ -4,8 +4,7 @@
 	Replace anything marked PLACEHOLDER with your own data.
 ]]
 
-local Library = loadstring(game:HttpGet("https://raw.githubusercontent.com/YOUR_USER/YOUR_REPO/main/LumenUI.lua"))() -- PLACEHOLDER url
--- local Library = require(path.to.LumenUI)            -- ModuleScript alternative
+local Library = loadstring(game:HttpGet("https://raw.githubusercontent.com/blizzrblx/LumenUI/refs/heads/main/LumenUI.lua"))() -- PLACEHOLDER url
 
 local Players = game:GetService("Players")
 local LocalPlayer = Players.LocalPlayer
