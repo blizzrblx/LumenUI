@@ -4,7 +4,7 @@
 	* Windows with tabs, two-column sections and section sub-tabs
 	* Draggable sub-windows (minimize / maximize / close, :Open())
 	* Label, Button (+ sub-button), Toggle (+ keybind / color pickers / tooltip),
-	  Slider, Dropdown (single / multi), Textbox, Keybind, ColorPicker,
+	  Slider, Dropdown (single / multi / searchable), Textbox, Keybind, ColorPicker,
 	  Viewport (+ overlay passthrough), Selectable Image List, Credits, Divider
 	* Notifications (top-right), Watermark, Keybind list (hotkeys panel)
 	* Dock (top-centre window launcher), Backdrop (screen dim + snow / rain / fireflies)
@@ -12,6 +12,16 @@
 	* Library.Flags[flag] -> element object   (read .Value, call :Set(...))
 	* Config save / load / import / export
 	* Icons through Footagesus/Icons (Main-v2.lua) with safe fallbacks
+
+	v1.3.0 - motion update (ideas ported from Airflow UI, Starlight Gen2 and LinoriaLib)
+	* Drag styles: Outline / Brackets / Ghost / Frame stand-ins that follow the cursor while the
+	  window glides into place on release, "Lift" (pop + shadow + optional tilt) and "Off"
+	* Critically-damped spring resize (no overshoot, eases to rest)
+	* Pooled click ripples on buttons, toggles and tabs
+	* Animated window open / close (scale + veil dissolve), also used by the RightShift toggle
+	* Directional tab page slide + a sliding selection pill behind tabs
+	* One-loop theme cross-fade (no per-object tween hitch)
+	* Collapsible sections, :SetDependsOn() (Linoria dependency boxes), searchable dropdowns
 
 	Works as a ModuleScript (require) or through loadstring(). Returns the Library table.
 	Full documentation: Documentation.md
@@ -36,7 +46,7 @@ local MOVE = Enum.UserInputType.MouseMovement
 --------------------------------------------------------------------------------
 
 local Library = {
-	Version = "1.2.0",
+	Version = "1.3.0",
 
 	-- Library.Flags[flagName] -> element object (has .Value, :Set(), :Get(), .Changed, ...)
 	Flags = {},
@@ -59,12 +69,33 @@ local Library = {
 
 	Unloaded = false,
 
-	-- drag easing: higher = snappier, lower = floatier. 0 = follow the cursor exactly.
+	-- Follow speed while dragging: higher = snappier, lower = floatier. 0 = follow the cursor exactly.
 	DragSmoothing = 11,
+
+	-- How a window looks while it is dragged (Library:SetDragStyle(name) or per-flag in the theme UI):
+	--   "Outline" / "Brackets" / "Ghost" / "Frame" : a stand-in follows the cursor, the window
+	--                                                glides into its spot when you let go
+	--   "Lift" : the window itself glides after the cursor, pops up and lifts its shadow
+	--   "Off"  : the window follows the cursor 1:1 with no effects
+	DragStyle = "Outline",
+	DragStyles = { "Outline", "Brackets", "Ghost", "Frame", "Lift", "Off" },
+	-- "Lift" only: max degrees the window leans into its motion. 0 = off, 2 = subtle.
+	DragTilt = 0,
+	-- keep at least the header of a dragged window reachable
+	KeepOnScreen = true,
 
 	-- windows and sub-windows can be resized from their right / bottom edges and bottom-right corner.
 	-- Set false to disable globally, or pass Resizable = false / MinSize = Vector2 per window.
 	Resizable = true,
+	-- spring stiffness of the resize glide (higher = snappier, 0 = follow the cursor exactly)
+	ResizeStiffness = 20,
+
+	-- seconds a theme change takes to cross-fade (0 = instant)
+	ThemeFade = 0.35,
+	-- animated window open / close (scale + dissolve)
+	WindowAnimation = true,
+	-- click ripples on buttons / toggles / tabs
+	Ripples = true,
 
 	-- false (default) = fully opaque panels. true = old see-through "glass" panels.
 	Glass = false,
@@ -101,6 +132,7 @@ local Library = {
 	_keybinds = {},
 	_listening = false,
 	_z = 10,
+	_uiVisible = true,
 	_iconPending = setmetatable({}, { __mode = "k" }),
 }
 Library.__index = Library
@@ -435,6 +467,59 @@ local function tintGradient(parent, tint, rotation)
 end
 
 --------------------------------------------------------------------------------
+-- Ripple (ported from Airflow UI): a soft accent circle that grows from the click point.
+-- Circles are pooled so rapid clicking does not allocate. `button` should clip its
+-- descendants (or sit where a spill looks fine, like the toggle checkbox).
+--------------------------------------------------------------------------------
+
+local ripplePool = {}
+
+local function ripple(button, color)
+	if not Library.Ripples or reducedMotion() or not button or not button.Parent then
+		return
+	end
+	local mouse = UserInputService:GetMouseLocation()
+	local abs, size = button.AbsolutePosition, button.AbsoluteSize
+	local diameter = math.max(size.X, size.Y) * 2.2
+	local circle = table.remove(ripplePool)
+	-- a pooled circle can't be reparented if it was destroyed along the way
+	if circle and not pcall(function()
+		circle.Parent = nil
+	end) then
+		circle = nil
+	end
+	if not circle then
+		circle = New("Frame", {
+			Name = "Ripple",
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			BackgroundTransparency = 0,
+			Active = false,
+		})
+		New("UICorner", { CornerRadius = UDim.new(1, 0), Parent = circle })
+	end
+	circle.Position = UDim2.fromOffset(mouse.X - abs.X, mouse.Y - abs.Y)
+	circle.Size = UDim2.fromOffset(0, 0)
+	circle.BackgroundColor3 = color or Library.Theme.Accent
+	circle.BackgroundTransparency = 0.8
+	circle.ZIndex = button.ZIndex + 1
+	circle.Parent = button
+	tween(circle, { Size = UDim2.fromOffset(diameter, diameter), BackgroundTransparency = 1 }, 0.55)
+	task.delay(0.55, function()
+		-- a button destroyed mid-ripple takes the circle with it: drop it
+		if circle.Parent ~= button or not button.Parent then
+			pcall(circle.Destroy, circle)
+			return
+		end
+		circle.Parent = nil
+		if #ripplePool < 4 then
+			table.insert(ripplePool, circle)
+		else
+			circle:Destroy()
+		end
+	end)
+end
+
+--------------------------------------------------------------------------------
 -- Icons (Footagesus/Icons)
 --------------------------------------------------------------------------------
 
@@ -589,29 +674,87 @@ end
 -- Theme / accent
 --------------------------------------------------------------------------------
 
---- Library:SetTheme({ Accent = Color3, Accent2 = Color3, Background = Color3, ... }) - live updates everything.
-function Library:SetTheme(new)
-	for k, v in new do
-		self.Theme[k] = v
-	end
+-- What is currently on screen. A theme change cross-fades from this to Library.Theme in ONE
+-- Heartbeat loop (ported from Airflow UI) instead of creating a tween per object.
+local shownTheme = table.clone(DEFAULT_THEME)
+local themeDriver = nil
+
+local function paintTheme(colors)
 	for inst, props in themed do
 		for prop, key in props do
-			pcall(function()
-				inst[prop] = self.Theme[key]
-			end)
+			local c = colors[key]
+			if typeof(c) == "Color3" then
+				inst[prop] = c
+			end
 		end
 	end
+	local seq = ColorSequence.new(colors.Accent, colors.Accent2)
 	for g in accentGradients do
-		g.Color = accentSequence()
+		g.Color = seq
 	end
 	for g, keys in themeGradients do
-		g.Color = ColorSequence.new(self.Theme[keys[1]], self.Theme[keys[2]])
+		g.Color = ColorSequence.new(colors[keys[1]], colors[keys[2]])
+	end
+end
+
+--- Library:SetTheme({ Accent = Color3, Accent2 = Color3, Background = Color3, ... }, instant?)
+--- Cross-fades over Library.ThemeFade seconds. Pass instant = true to skip the fade
+--- (used while dragging color pickers).
+function Library:SetTheme(new, instant)
+	for k, v in new do
+		self.Theme[k] = v
 	end
 	if new.BackgroundAngle then
 		for g in mainGradients do
 			g.Rotation = new.BackgroundAngle
 		end
 	end
+	if themeDriver then
+		themeDriver:Disconnect()
+		themeDriver = nil
+	end
+
+	local from = {}
+	for k, target in self.Theme do
+		local cur = shownTheme[k]
+		if typeof(target) == "Color3" and typeof(cur) == "Color3" and cur ~= target then
+			from[k] = cur
+		end
+	end
+	local duration = instant and 0 or (self.ThemeFade or 0)
+	if reducedMotion() then
+		duration = 0
+	end
+
+	local function finish()
+		for k, v in self.Theme do
+			shownTheme[k] = v
+		end
+		paintTheme(self.Theme)
+	end
+	if duration <= 0 or next(from) == nil then
+		finish()
+		return
+	end
+
+	local colors = table.clone(shownTheme)
+	local elapsed = 0
+	themeDriver = RunService.Heartbeat:Connect(function(dt)
+		elapsed += dt
+		if elapsed >= duration then
+			themeDriver:Disconnect()
+			themeDriver = nil
+			finish()
+			return
+		end
+		local a = 1 - (1 - elapsed / duration) ^ 4
+		for k, start in from do
+			local c = start:Lerp(self.Theme[k], a)
+			colors[k] = c
+			shownTheme[k] = c
+		end
+		paintTheme(colors)
+	end)
 end
 
 --- Apply a preset by name: "Midnight", "Hidden", "Illusionary", "Crimson", "Emerald", "Ocean" (+ your own in Library.Themes)
@@ -622,6 +765,19 @@ function Library:ApplyThemePreset(name)
 	end
 	self:SetTheme(t)
 	return true
+end
+
+--- Library:SetDragStyle("Outline" | "Brackets" | "Ghost" | "Frame" | "Lift" | "Off")
+function Library:SetDragStyle(style)
+	if not table.find(self.DragStyles, style) then
+		style = "Outline"
+	end
+	self.DragStyle = style
+	return style
+end
+
+function Library:GetDragStyle()
+	return self.DragStyle
 end
 
 --------------------------------------------------------------------------------
@@ -652,7 +808,7 @@ function Library:_Gui()
 	gui.Parent = self.Parent or (LocalPlayer and LocalPlayer:WaitForChild("PlayerGui"))
 	self.Gui = gui
 
-	-- Layers (ZIndex orders them): HUD < windows < toasts < tooltip
+	-- Layers (ZIndex orders them): HUD < windows < drag stand-ins < toasts < tooltip
 	self.BackdropLayer = New("Frame", { Name = "Backdrop", Size = UDim2.fromScale(1, 1), ZIndex = 0, Parent = gui })
 	self._bdDim = New("Frame", {
 		Name = "Dim",
@@ -672,8 +828,9 @@ function Library:_Gui()
 	})
 	self.HudLayer = New("Frame", { Name = "Hud", Size = UDim2.fromScale(1, 1), ZIndex = 1, Parent = gui })
 	self.WindowLayer = New("Frame", { Name = "Windows", Size = UDim2.fromScale(1, 1), ZIndex = 2, Parent = gui })
-	self.ToastLayer = New("Frame", { Name = "Toasts", Size = UDim2.fromScale(1, 1), ZIndex = 3, Parent = gui })
-	self.TipLayer = New("Frame", { Name = "Tooltips", Size = UDim2.fromScale(1, 1), ZIndex = 4, Parent = gui })
+	self.DragLayer = New("Frame", { Name = "DragStandIns", Size = UDim2.fromScale(1, 1), ZIndex = 3, Parent = gui })
+	self.ToastLayer = New("Frame", { Name = "Toasts", Size = UDim2.fromScale(1, 1), ZIndex = 4, Parent = gui })
+	self.TipLayer = New("Frame", { Name = "Tooltips", Size = UDim2.fromScale(1, 1), ZIndex = 5, Parent = gui })
 
 	self:_setupInput()
 	self:_global(RunService.RenderStepped, function(dt)
@@ -726,23 +883,122 @@ local function bindDrag(obj, onBegin, onMove, onEnd)
 	end)
 end
 
---- Makes `handle` drag `target` around the screen (clamped so the header stays reachable).
---- The window chases the cursor with exponential smoothing (Library.DragSmoothing) so it glides
---- and settles instead of snapping, and its shadow lifts while it is carried.
-local function makeDraggable(handle, target)
-	local startPointer, startAbs, basePos
-	local goal, cur = Vector2.zero, Vector2.zero
-	local held = false
-	local loop
+--- Stand-in shown while a window is dragged (ported from Airflow UI's drag skeleton).
+--- Returns the frame and a fade() that dissolves it.
+local function makeSkeleton(size, topLeft, style)
+	local T = Library.Theme
+	local sk = New("Frame", {
+		Name = "DragSkeleton",
+		Position = UDim2.fromOffset(topLeft.X, topLeft.Y),
+		Size = UDim2.fromOffset(size.X, size.Y),
+		BackgroundColor3 = style == "Ghost" and T.Background or T.Accent,
+		BackgroundTransparency = 1,
+		ZIndex = 5,
+		Parent = Library.DragLayer,
+	})
+	corner(sk, 8)
 
-	local function apply(d)
-		target.Position = UDim2.new(basePos.X.Scale, basePos.X.Offset + d.X, basePos.Y.Scale, basePos.Y.Offset + d.Y)
-	end
-	local function lift(on)
-		local sh = target:FindFirstChild("Shadow")
-		if sh and sh:IsA("ImageLabel") then
-			tween(sh, { ImageTransparency = on and 0.15 or 0.45 }, 0.25)
+	-- each part fades from hidden to its "shown" values, and back on release
+	local parts = {}
+	local function part(obj, shown)
+		local hidden = {}
+		for k in shown do
+			hidden[k] = 1
 		end
+		table.insert(parts, { Object = obj, Shown = shown, Hidden = hidden })
+	end
+	local function brackets(len, inset)
+		for _, spot in { Vector2.new(0, 0), Vector2.new(1, 0), Vector2.new(0, 1), Vector2.new(1, 1) } do
+			local at = UDim2.new(spot.X, spot.X == 0 and inset or -inset, spot.Y, spot.Y == 0 and inset or -inset)
+			for _, sz in { UDim2.fromOffset(len, 2), UDim2.fromOffset(2, len) } do
+				local b = New("Frame", {
+					AnchorPoint = spot,
+					Position = at,
+					Size = sz,
+					BackgroundColor3 = T.Accent,
+					BackgroundTransparency = 1,
+					Parent = sk,
+				})
+				corner(b, 1)
+				part(b, { BackgroundTransparency = 0 })
+			end
+		end
+	end
+
+	if style == "Brackets" then
+		brackets(22, 0)
+	elseif style == "Ghost" then
+		-- a see-through copy of the window's panel
+		part(sk, { BackgroundTransparency = 0.35 })
+		part(stroke(sk, T.Stroke, 1, 1), { Transparency = 0 })
+	elseif style == "Frame" then
+		-- a single quiet line, nothing else
+		part(stroke(sk, T.Muted, 1, 1), { Transparency = 0 })
+	else
+		-- Outline: faint accent wash + outline + corner brackets
+		part(sk, { BackgroundTransparency = 0.92 })
+		part(stroke(sk, T.Accent, 1, 1), { Transparency = 0.2 })
+		brackets(16, 6)
+	end
+
+	local scale = New("UIScale", { Scale = 1.02, Parent = sk })
+	for _, p in parts do
+		tween(p.Object, p.Shown, 0.15, Enum.EasingStyle.Quad)
+	end
+	tween(scale, { Scale = 1 }, 0.25, Enum.EasingStyle.Quint)
+
+	local function fade()
+		for _, p in parts do
+			tween(p.Object, p.Hidden, 0.2, Enum.EasingStyle.Quad)
+		end
+		task.delay(0.22, function()
+			sk:Destroy()
+		end)
+	end
+	return sk, fade
+end
+
+--- Makes `handle` drag `target` around the screen (clamped so the header stays reachable).
+--- opts.Style overrides Library.DragStyle (HUD pieces pass "Lift"). The style decides the look:
+---   skeleton styles : a stand-in chases the cursor, the window glides into place on release
+---   "Lift"          : window glides after the cursor, pops up, shadow lifts, optional tilt
+---   "Off"           : window follows the cursor 1:1
+local function makeDraggable(handle, target, opts)
+	opts = opts or {}
+	local startPointer, startTL, basePos
+	local goal, cur = Vector2.zero, Vector2.zero
+	local held, moved, lifted = false, false, false
+	local mode = "Lift"
+	local loop, skeleton, fadeSkeleton, settle
+
+	local function origin()
+		return Library.Gui and Library.Gui.AbsolutePosition or Vector2.zero
+	end
+	local function styleOf()
+		local s = opts.Style or Library.DragStyle or "Outline"
+		if not table.find(Library.DragStyles, s) then
+			s = "Outline"
+		end
+		return s
+	end
+	local function posFor(tl)
+		local d = tl - startTL
+		return UDim2.new(basePos.X.Scale, basePos.X.Offset + d.X, basePos.Y.Scale, basePos.Y.Offset + d.Y)
+	end
+	local function place(tl)
+		if skeleton then
+			skeleton.Position = UDim2.fromOffset(tl.X, tl.Y)
+		else
+			target.Position = posFor(tl)
+		end
+	end
+	local function clampTL(tl)
+		if not Library.KeepOnScreen then
+			return tl
+		end
+		local screen = Library.Gui and Library.Gui.AbsoluteSize or Vector2.new(1920, 1080)
+		local size = target.AbsoluteSize
+		return Vector2.new(clamp(tl.X, -size.X + 90, screen.X - 90), clamp(tl.Y, 0, screen.Y - 30))
 	end
 	local function stopLoop()
 		if loop then
@@ -751,44 +1007,130 @@ local function makeDraggable(handle, target)
 		end
 	end
 
-	bindDrag(handle, function(input)
-		stopLoop()
-		startPointer = Vector2.new(input.Position.X, input.Position.Y)
-		startAbs = target.AbsolutePosition
-		basePos = target.Position
-		goal, cur = Vector2.zero, Vector2.zero
-		held = true
-		lift(true)
-		if (Library.DragSmoothing or 0) > 0 and not reducedMotion() then
+	local function lift(on)
+		if lifted == on then
+			return
+		end
+		lifted = on
+		local sh = target:FindFirstChild("Shadow")
+		if sh and sh:IsA("ImageLabel") then
+			tween(sh, { ImageTransparency = on and 0.15 or 0.45 }, 0.25)
+		end
+		local sc = target:FindFirstChildOfClass("UIScale")
+		if sc and mode ~= "Off" then
+			if on then
+				tween(sc, { Scale = 1.018 }, 0.2, Enum.EasingStyle.Quint)
+			else
+				tween(sc, { Scale = 1 }, 0.45, Enum.EasingStyle.Back)
+			end
+		end
+		if not on and target.Rotation ~= 0 then
+			tween(target, { Rotation = 0 }, 0.4, Enum.EasingStyle.Back)
+		end
+	end
+
+	local function beginMove()
+		if settle then
+			settle:Cancel()
+			settle = nil
+		end
+		local useSkeleton = mode ~= "Lift" and mode ~= "Off" and Library.DragLayer ~= nil
+		if useSkeleton then
+			skeleton, fadeSkeleton = makeSkeleton(target.AbsoluteSize, startTL, mode)
+			-- the real window dims a touch so the stand-in reads as "the thing you carry"
+			local sh = target:FindFirstChild("Shadow")
+			if sh and sh:IsA("ImageLabel") then
+				tween(sh, { ImageTransparency = 0.7 }, 0.2)
+			end
+		elseif mode ~= "Off" then
+			lift(true)
+		end
+
+		local k = mode == "Off" and 0 or (Library.DragSmoothing or 0)
+		if skeleton then
+			k *= 3 -- stand-ins stick closer to the cursor than a floaty window would
+		end
+		if k > 0 and not reducedMotion() then
+			local tilt = (mode == "Lift" and Library.DragTilt) or 0
 			loop = RunService.RenderStepped:Connect(function(dt)
-				local k = Library.DragSmoothing
-				local alpha = 1 - math.exp(-k * math.min(dt, 0.05))
-				cur = cur:Lerp(goal, alpha)
-				apply(cur)
+				dt = math.min(dt, 0.05)
+				local prev = cur
+				cur = cur:Lerp(goal, 1 - math.exp(-k * dt))
+				place(cur)
+				if tilt > 0 and not skeleton then
+					local vx = (cur.X - prev.X) / math.max(dt, 0.001)
+					local want = clamp(vx * 0.0025, -tilt, tilt)
+					target.Rotation += (want - target.Rotation) * (1 - math.exp(-14 * dt))
+				end
 				if not held and (goal - cur).Magnitude < 0.25 then
-					apply(goal)
+					place(goal)
 					stopLoop()
 				end
 			end)
 		end
+	end
+
+	local function endMove()
+		if skeleton then
+			local sk, fade = skeleton, fadeSkeleton
+			stopLoop()
+			skeleton, fadeSkeleton = nil, nil
+			-- the window glides into the spot the stand-in marked, with a tiny landing pop
+			settle = tween(target, { Position = posFor(goal) }, 0.38, Enum.EasingStyle.Quint)
+			fade()
+			local sh = target:FindFirstChild("Shadow")
+			if sh and sh:IsA("ImageLabel") then
+				tween(sh, { ImageTransparency = 0.45 }, 0.4)
+			end
+			local sc = target:FindFirstChildOfClass("UIScale")
+			if sc and not reducedMotion() then
+				sc.Scale = 0.985
+				tween(sc, { Scale = 1 }, 0.5, Enum.EasingStyle.Back)
+			end
+			if sk then
+				sk.Name = "DragSkeletonFading"
+			end
+		else
+			lift(false)
+		end
+	end
+
+	bindDrag(handle, function(input)
+		if opts.Locked and opts.Locked() then
+			return false
+		end
+		stopLoop()
+		startPointer = Vector2.new(input.Position.X, input.Position.Y)
+		startTL = target.AbsolutePosition - origin()
+		basePos = target.Position
+		goal, cur = startTL, startTL
+		held, moved = true, false
+		mode = styleOf()
 	end, function(input)
 		local d = Vector2.new(input.Position.X, input.Position.Y) - startPointer
-		local screen = Library.Gui and Library.Gui.AbsoluteSize or Vector2.new(1920, 1080)
-		local size = target.AbsoluteSize
-		local abs = startAbs + d
-		local cx = clamp(abs.X, -size.X + 90, screen.X - 90)
-		local cy = clamp(abs.Y, 0, screen.Y - 30)
-		goal = Vector2.new(cx, cy) - startAbs
+		if not moved then
+			if d.Magnitude < 3 then
+				return
+			end
+			moved = true
+			beginMove()
+		end
+		goal = clampTL(startTL + d)
 		if not loop then
-			apply(goal)
+			place(goal)
 		end
 	end, function()
 		held = false
-		lift(false)
+		if moved then
+			moved = false
+			endMove()
+		end
 	end)
 end
 
---- Adds right / bottom / corner resize handles to a floating panel. Eased like dragging.
+--- Adds right / bottom / corner resize handles to a floating panel.
+--- The size follows the cursor through a critically damped spring (ported from Airflow UI):
+--- it glides after the pointer and eases to rest without overshooting.
 --- Returns { Grips = Frame, SetLocked(bool) }.  Growth is compensated for the holder's AnchorPoint
 --- so the top-left corner stays put.
 local function makeResizable(holder, opts)
@@ -798,7 +1140,7 @@ local function makeResizable(holder, opts)
 	local state = { Grips = grips, Locked = false }
 
 	local startPointer, startSize, startPos
-	local goal, cur = Vector2.zero, Vector2.zero
+	local goal, cur, vel = Vector2.zero, Vector2.zero, Vector2.zero
 	local held, loop = false, nil
 	local dirX, dirY = 0, 0
 
@@ -831,14 +1173,19 @@ local function makeResizable(holder, opts)
 			startPointer = Vector2.new(input.Position.X, input.Position.Y)
 			startSize = holder.AbsoluteSize
 			startPos = holder.Position
-			goal, cur = startSize, startSize
+			goal, cur, vel = startSize, startSize, Vector2.zero
 			held = true
-			if (Library.DragSmoothing or 0) > 0 and not reducedMotion() then
+			local stiffness = Library.ResizeStiffness or 0
+			if stiffness > 0 and not reducedMotion() then
 				loop = RunService.RenderStepped:Connect(function(dt)
-					local k = Library.DragSmoothing * 1.3
-					cur = cur:Lerp(goal, 1 - math.exp(-k * math.min(dt, 0.05)))
-					apply(cur)
-					if not held and (goal - cur).Magnitude < 0.3 then
+					dt = math.min(dt, 1 / 30)
+					local decay = math.exp(-stiffness * dt)
+					local offset = cur - goal
+					local drift = (vel + offset * stiffness) * dt
+					vel = (vel - drift * stiffness) * decay
+					cur = goal + (offset + drift) * decay
+					apply(Vector2.new(math.floor(cur.X + 0.5), math.floor(cur.Y + 0.5)))
+					if not held and (cur - goal).Magnitude < 0.3 and vel.Magnitude < 3 then
 						apply(goal)
 						stopLoop()
 					end
@@ -1025,15 +1372,41 @@ function Library:_registerKeybind(kb)
 end
 
 --- Show / hide all windows & sub-windows (HUD elements stay visible).
+--- Every visible window plays its open / close animation together.
 function Library:ToggleUI(state)
 	if not self.WindowLayer then
 		return
 	end
 	if state == nil then
-		state = not self.WindowLayer.Visible
+		state = not self._uiVisible
 	end
-	self.WindowLayer.Visible = state
+	if state == self._uiVisible then
+		return
+	end
+	self._uiVisible = state
+	self._uiGen = (self._uiGen or 0) + 1
+	local gen = self._uiGen
 	self:_backdropShow(state)
+
+	if state then
+		self.WindowLayer.Visible = true
+		for _, h in self.WindowLayer:GetChildren() do
+			if h:IsA("GuiObject") and h.Visible then
+				Library._playIn(h)
+			end
+		end
+	else
+		for _, h in self.WindowLayer:GetChildren() do
+			if h:IsA("GuiObject") and h.Visible then
+				Library._playOut(h)
+			end
+		end
+		task.delay(Library.WindowAnimation and 0.22 or 0, function()
+			if self._uiGen == gen and not self._uiVisible and self.WindowLayer then
+				self.WindowLayer.Visible = false
+			end
+		end)
+	end
 end
 
 
@@ -1194,7 +1567,7 @@ function Library:SetBackdrop(opts)
 		bd.Enabled = true
 	end
 	self:_backdropBuild()
-	self:_backdropShow(self.WindowLayer.Visible)
+	self:_backdropShow(self._uiVisible ~= false)
 end
 
 --------------------------------------------------------------------------------
@@ -1625,6 +1998,10 @@ function Library:Unload()
 		return
 	end
 	self.Unloaded = true
+	if themeDriver then
+		themeDriver:Disconnect()
+		themeDriver = nil
+	end
 	for _, c in self._conns do
 		pcall(function()
 			c:Disconnect()
@@ -1657,6 +2034,47 @@ function Base:SetVisible(v)
 	self.Instance.Visible = v
 end
 
+--- element:SetDependsOn(other, expected)   (idea from LinoriaLib dependency boxes)
+--- The element is only shown while `other` matches:
+---   expected == nil       -> other.Value == true          (toggles)
+---   expected == value     -> other.Value == value         (dropdown / multi-dropdown contains it)
+---   expected == function  -> expected(other.Value) is truthy
+--- `other` may be an element or a flag name. SetDependsOn(nil) removes the rule.
+function Base:SetDependsOn(other, expected)
+	if self._depConn then
+		self._depConn:Disconnect()
+		self._depConn = nil
+	end
+	if other == nil then
+		self:SetVisible(true)
+		return self
+	end
+	if type(other) == "string" then
+		other = Library.Flags[other]
+	end
+	if not other or not other.Changed then
+		warn("[LumenUI] SetDependsOn: dependency element not found")
+		return self
+	end
+	local function check()
+		local v = other.Value
+		local ok
+		if type(expected) == "function" then
+			ok = expected(v)
+		elseif expected == nil then
+			ok = v == true
+		elseif type(v) == "table" then
+			ok = table.find(v, expected) ~= nil
+		else
+			ok = v == expected
+		end
+		self:SetVisible(ok and true or false)
+	end
+	self._depConn = other.Changed:Connect(check)
+	check()
+	return self
+end
+
 function Base:SetDisabled(d)
 	self.Disabled = d and true or false
 	if not self._blocker then
@@ -1677,6 +2095,10 @@ end
 function Base:Destroy()
 	if self.Flag and Library.Flags[self.Flag] == self then
 		Library.Flags[self.Flag] = nil
+	end
+	if self._depConn then
+		self._depConn:Disconnect()
+		self._depConn = nil
 	end
 	if self._cleanup then
 		self._cleanup()
@@ -2149,6 +2571,10 @@ function Container:_finish(obj, opts, frame, skipTooltip)
 	if opts.Disabled then
 		obj:SetDisabled(true)
 	end
+	if opts.DependsOn then
+		-- DependsOn = { Element | "flag", expectedValue? }
+		obj:SetDependsOn(opts.DependsOn[1], opts.DependsOn[2])
+	end
 	return obj
 end
 
@@ -2239,6 +2665,7 @@ function Container:AddButton(opts)
 			Text = o.Name or "Button",
 			FontFace = FONT_SEMI,
 			TextSize = 12,
+			ClipsDescendants = true,
 			LayoutOrder = order,
 			Parent = frame,
 		})
@@ -2287,6 +2714,7 @@ function Container:AddButton(opts)
 			if obj.Disabled then
 				return
 			end
+			ripple(btn, o.Accent and Color3.new(1, 1, 1) or nil)
 			safeCall(o.Callback)
 			obj.Changed:Fire()
 		end)
@@ -2407,6 +2835,7 @@ function Container:AddToggle(opts)
 
 	hit.Activated:Connect(function()
 		if not obj.Disabled then
+			ripple(box)
 			obj:Set(not obj.Value)
 		end
 	end)
@@ -2610,6 +3039,9 @@ function Container:AddColorPicker(opts)
 	if opts.Disabled then
 		picker:SetDisabled(true)
 	end
+	if opts.DependsOn then
+		picker:SetDependsOn(opts.DependsOn[1], opts.DependsOn[2])
+	end
 	picker.Container = self
 	return picker
 end
@@ -2725,12 +3157,19 @@ end
 
 ------------------------------------------------------------------- Dropdown --
 
+--[[
+	AddDropdown({ Name, Options = {...}, Default, Multi = false, AllowNone = false,
+	              Searchable = false,   -- search box on top of the list (from LinoriaLib)
+	              MaxVisible = 6, Callback })
+]]
 function Container:AddDropdown(opts)
 	opts = opts or {}
 	local multi = opts.Multi == true
+	local searchable = opts.Searchable == true
 	local options = table.clone(opts.Options or {})
 	local maxVisible = opts.MaxVisible or 6
 	local ITEM_H = 22
+	local SEARCH_H = searchable and 28 or 0
 
 	local frame, body = self:_autoRow(4)
 	if opts.Name then
@@ -2770,8 +3209,34 @@ function Container:AddDropdown(opts)
 	})
 	corner(listWrap, 6)
 	stroke(listWrap, "@Stroke", 1, 0.3)
+
+	local searchBox
+	if searchable then
+		local sw = New("Frame", {
+			Position = UDim2.fromOffset(6, 5),
+			Size = UDim2.new(1, -12, 0, 20),
+			BackgroundColor3 = "@Panel",
+			BackgroundTransparency = 0,
+			Parent = listWrap,
+		})
+		corner(sw, 4)
+		stroke(sw, "@Stroke", 1, 0.3)
+		searchBox = New("TextBox", {
+			Position = UDim2.fromOffset(8, 0),
+			Size = UDim2.new(1, -16, 1, 0),
+			Text = "",
+			PlaceholderText = "Search...",
+			PlaceholderColor3 = Library.Theme.Muted,
+			ClearTextOnFocus = false,
+			TextSize = 11,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Parent = sw,
+		})
+	end
+
 	local scroll = New("ScrollingFrame", {
-		Size = UDim2.fromScale(1, 1),
+		Position = UDim2.fromOffset(0, SEARCH_H),
+		Size = UDim2.new(1, 0, 1, -SEARCH_H),
 		CanvasSize = UDim2.new(),
 		AutomaticCanvasSize = Enum.AutomaticSize.Y,
 		ScrollBarThickness = 2,
@@ -2816,7 +3281,20 @@ function Container:AddDropdown(opts)
 	end
 
 	local function listHeight()
-		return math.min(#options, maxVisible) * ITEM_H + 8
+		return math.min(#options, maxVisible) * ITEM_H + 8 + SEARCH_H
+	end
+
+	local function applyFilter()
+		if not searchBox then
+			return
+		end
+		local q = string.lower(searchBox.Text)
+		for name, it in items do
+			it.Button.Visible = q == "" or string.find(string.lower(tostring(name)), q, 1, true) ~= nil
+		end
+	end
+	if searchBox then
+		searchBox:GetPropertyChangedSignal("Text"):Connect(applyFilter)
 	end
 
 	local function setOpen(open)
@@ -2833,6 +3311,9 @@ function Container:AddDropdown(opts)
 			tween(listWrap, { Size = UDim2.new(1, 0, 0, 0) }, 0.22, Enum.EasingStyle.Quint)
 			tween(arrow, { Rotation = 0 }, 0.3, Enum.EasingStyle.Back)
 			tween(btnStroke, { Color = Library.Theme.Stroke }, 0.15)
+			if searchBox then
+				searchBox.Text = ""
+			end
 			task.delay(0.17, function()
 				if not obj.Opened then
 					listWrap.Visible = false
@@ -2916,6 +3397,7 @@ function Container:AddDropdown(opts)
 			end)
 			paintItem(name)
 		end
+		applyFilter()
 		if obj.Opened then
 			listWrap.Size = UDim2.new(1, 0, 0, listHeight())
 		end
@@ -4023,7 +4505,8 @@ function Library:CreateKeybindList(opts)
 		TextXAlignment = Enum.TextXAlignment.Left,
 		Parent = header,
 	})
-	makeDraggable(header, frame)
+	-- HUD pieces always use the soft "Lift" glide (no stand-in)
+	makeDraggable(header, frame, { Style = "Lift" })
 
 	local rows = New("Frame", {
 		Size = UDim2.new(1, 0, 0, 0),
@@ -4180,7 +4663,7 @@ function Library:CreateWatermark(opts)
 	function obj:SetVisible(v)
 		frame.Visible = v
 	end
-	makeDraggable(frame, frame)
+	makeDraggable(frame, frame, { Style = "Lift" })
 	render()
 	return obj
 end
@@ -4264,7 +4747,14 @@ end
 local Tab = {}
 Tab.__index = Tab
 
---- Tab:CreateSection({ Name = "Aimbot", Side = "Left" | "Right" | "Full", Gradient = Color3?, Plain = false })
+--[[
+	Tab:CreateSection({
+		Name = "Aimbot", Side = "Left" | "Right" | "Full", Gradient = Color3?, Plain = false,
+		Collapsible = false,   -- header click folds the section with an animated height (from Airflow / Starlight groupboxes)
+		StartClosed = false,
+	})
+	section:SetOpen(bool)  section:ToggleOpen()  section.Opened
+]]
 function Tab:CreateSection(opts)
 	if type(opts) == "string" then
 		opts = { Name = opts }
@@ -4296,26 +4786,135 @@ function Tab:CreateSection(opts)
 		end
 	end
 
+	local collapsible = opts.Collapsible == true and opts.Name ~= nil
+	local chev, headerBtn
+
 	if opts.Name then
-		New("TextLabel", {
-			Size = UDim2.new(1, 0, 0, 14),
-			Text = opts.Name,
-			FontFace = FONT_BOLD,
-			TextSize = 12,
-			TextXAlignment = Enum.TextXAlignment.Left,
-			LayoutOrder = 0,
+		if collapsible then
+			headerBtn = New("TextButton", {
+				Name = "Header",
+				Size = UDim2.new(1, 0, 0, 16),
+				LayoutOrder = 0,
+				Parent = card,
+			})
+			New("TextLabel", {
+				Size = UDim2.new(1, -20, 1, 0),
+				Text = opts.Name,
+				FontFace = FONT_BOLD,
+				TextSize = 12,
+				TextXAlignment = Enum.TextXAlignment.Left,
+				Parent = headerBtn,
+			})
+			chev = icon(headerBtn, "chevron-down", 14, "@SubText", {
+				AnchorPoint = Vector2.new(1, 0.5),
+				Position = UDim2.fromScale(1, 0.5),
+			})
+			chev.Rotation = opts.StartClosed and -90 or 0
+		else
+			New("TextLabel", {
+				Size = UDim2.new(1, 0, 0, 14),
+				Text = opts.Name,
+				FontFace = FONT_BOLD,
+				TextSize = 12,
+				TextXAlignment = Enum.TextXAlignment.Left,
+				LayoutOrder = 0,
+				Parent = card,
+			})
+		end
+	end
+
+	local holder = card -- what the section's own children (content, sub-tab bar...) live in
+	local clip, innerLayout
+	if collapsible then
+		clip = New("Frame", {
+			Name = "Clip",
+			Size = UDim2.new(1, 0, 0, 0),
+			AutomaticSize = Enum.AutomaticSize.Y,
+			ClipsDescendants = true,
+			LayoutOrder = 3,
 			Parent = card,
 		})
+		holder = New("Frame", {
+			Name = "Inner",
+			Size = UDim2.new(1, 0, 0, 0),
+			AutomaticSize = Enum.AutomaticSize.Y,
+			Parent = clip,
+		})
+		innerLayout = list(holder, 8)
 	end
+
 	local content = New("Frame", {
 		Name = "Content",
 		Size = UDim2.new(1, 0, 0, 0),
 		AutomaticSize = Enum.AutomaticSize.Y,
 		LayoutOrder = 3,
-		Parent = card,
+		Parent = holder,
 	})
 	list(content, 7)
-	return setmetatable({ Content = content, Card = card, Tab = self }, Section)
+
+	local sec = setmetatable({ Content = content, Card = holder, Tab = self, Opened = true }, Section)
+
+	if collapsible then
+		local gen = 0
+		local function setOpen(v, instant)
+			v = v and true or false
+			if v == sec.Opened then
+				return
+			end
+			sec.Opened = v
+			gen += 1
+			local g = gen
+			local quick = instant or reducedMotion()
+			tween(chev, { Rotation = v and 0 or -90 }, 0.25, Enum.EasingStyle.Back)
+			if v then
+				local full = innerLayout.AbsoluteContentSize.Y
+				clip.Visible = true
+				if quick or full <= 0 then
+					clip.AutomaticSize = Enum.AutomaticSize.Y
+					clip.Size = UDim2.new(1, 0, 0, 0)
+					return
+				end
+				local from = clip.AbsoluteSize.Y
+				clip.AutomaticSize = Enum.AutomaticSize.None
+				clip.Size = UDim2.new(1, 0, 0, from)
+				tween(clip, { Size = UDim2.new(1, 0, 0, full) }, 0.34, Enum.EasingStyle.Quint)
+				task.delay(0.36, function()
+					if g == gen and sec.Opened then
+						clip.AutomaticSize = Enum.AutomaticSize.Y
+						clip.Size = UDim2.new(1, 0, 0, 0)
+					end
+				end)
+			else
+				if quick then
+					clip.Visible = false
+					return
+				end
+				clip.AutomaticSize = Enum.AutomaticSize.None
+				clip.Size = UDim2.new(1, 0, 0, clip.AbsoluteSize.Y)
+				tween(clip, { Size = UDim2.new(1, 0, 0, 0) }, 0.28, Enum.EasingStyle.Quint)
+				task.delay(0.3, function()
+					if g == gen and not sec.Opened then
+						clip.Visible = false
+					end
+				end)
+			end
+		end
+		function sec:SetOpen(v, instant)
+			setOpen(v, instant)
+		end
+		function sec:ToggleOpen()
+			setOpen(not sec.Opened)
+		end
+		headerBtn.Activated:Connect(function()
+			setOpen(not sec.Opened)
+		end)
+		if opts.StartClosed then
+			sec.Opened = false
+			clip.Visible = false
+		end
+	end
+
+	return sec
 end
 
 --- Tab:SetWarning({ Title, Text, Color }) / Tab:SetWarning(nil) to hide
@@ -4592,7 +5191,68 @@ local function glassFrame(holder, size)
 	local g = themeGradient(main, "Background", "Background2", Library.Theme.BackgroundAngle)
 	mainGradients[g] = true
 	Library:_attachBackground(main, 8)
+	-- Veil: a window-colored sheet above everything. It is clear at rest; open / close animations
+	-- fade it so the whole window dissolves in and out (frames can't fade their children otherwise).
+	local veil = New("Frame", {
+		Name = "Veil",
+		Size = UDim2.fromScale(1, 1),
+		BackgroundColor3 = "@Background",
+		BackgroundTransparency = 1,
+		Active = false,
+		ZIndex = 100,
+		Parent = main,
+	})
+	corner(veil, 8)
 	return main, shadow
+end
+
+-- Open / close animation shared by Window, SubWindow and Library:ToggleUI.
+local function holderParts(holder)
+	local main = holder:FindFirstChild("Main")
+	local veil = main and main:FindFirstChild("Veil")
+	return veil, holder:FindFirstChildOfClass("UIScale"), holder:FindFirstChild("Shadow")
+end
+
+function Library._playIn(holder)
+	local veil, sc, sh = holderParts(holder)
+	if not Library.WindowAnimation or reducedMotion() or not (veil and sc) then
+		if veil then
+			veil.BackgroundTransparency = 1
+		end
+		if sc then
+			sc.Scale = 1
+		end
+		if sh then
+			sh.ImageTransparency = 0.45
+		end
+		return
+	end
+	sc.Scale = 0.92
+	veil.BackgroundTransparency = 0
+	if sh then
+		sh.ImageTransparency = 1
+		tween(sh, { ImageTransparency = 0.45 }, 0.4)
+	end
+	tween(sc, { Scale = 1 }, 0.5, Enum.EasingStyle.Back)
+	tween(veil, { BackgroundTransparency = 1 }, 0.28, Enum.EasingStyle.Quad)
+end
+
+function Library._playOut(holder, done)
+	local veil, sc, sh = holderParts(holder)
+	if not Library.WindowAnimation or reducedMotion() or not (veil and sc) then
+		if done then
+			done()
+		end
+		return
+	end
+	tween(veil, { BackgroundTransparency = 0 }, 0.14, Enum.EasingStyle.Quad)
+	tween(sc, { Scale = 0.94 }, 0.2, Enum.EasingStyle.Quint, Enum.EasingDirection.In)
+	if sh then
+		tween(sh, { ImageTransparency = 1 }, 0.18)
+	end
+	if done then
+		task.delay(0.2, done)
+	end
 end
 
 --[[
@@ -4601,6 +5261,7 @@ end
 		Badges = { { Text = "Pro", Color = Color3 }, { Text = "v2.0", Color = Color3 } },
 		Size = UDim2.fromOffset(560, 520), Position = UDim2,
 		Icon = "sparkles", OnClose = function() end,
+		Layout = "Top" | "Sidebar", Visible = true,
 	})
 ]]
 function Library:CreateWindow(opts)
@@ -4637,7 +5298,9 @@ function Library:CreateWindow(opts)
 		Tabs = {},
 		Active = nil,
 		Layout = layout,
+		Opened = true,
 		_size = size,
+		_scale = uiScale,
 		_minimized = false,
 		OnClose = opts.OnClose,
 	}, Window)
@@ -4706,6 +5369,18 @@ function Library:CreateWindow(opts)
 	if sidebar then
 		-- vertical icon sidebar (like a hub dashboard)
 		local showAvatar = opts.SidebarAvatar ~= false
+
+		-- sliding selection pill: glides behind the sidebar buttons
+		window._pill = New("Frame", {
+			Name = "TabPill",
+			BackgroundColor3 = "@Element",
+			BackgroundTransparency = 0,
+			ZIndex = 1,
+			Parent = main,
+		})
+		corner(window._pill, 10)
+		stroke(window._pill, "@Accent", 1, 0.1)
+
 		local side = New("ScrollingFrame", {
 			Name = "Sidebar",
 			Position = UDim2.fromOffset(8, headerH),
@@ -4714,6 +5389,7 @@ function Library:CreateWindow(opts)
 			AutomaticCanvasSize = Enum.AutomaticSize.Y,
 			ScrollBarThickness = 0,
 			ScrollingDirection = Enum.ScrollingDirection.Y,
+			ZIndex = 2,
 			Parent = main,
 		})
 		list(side, 6, nil, Enum.HorizontalAlignment.Center)
@@ -4755,6 +5431,15 @@ function Library:CreateWindow(opts)
 	else
 		-- top tab bar
 		local barWrap = New("Frame", { Name = "TabBar", Position = UDim2.fromOffset(0, 42), Size = UDim2.new(1, 0, 0, 32), Parent = main })
+		-- sliding selection pill: glides behind the tab labels
+		window._pill = New("Frame", {
+			Name = "TabPill",
+			BackgroundColor3 = "@Checkbox",
+			BackgroundTransparency = 0.35,
+			ZIndex = 0,
+			Parent = barWrap,
+		})
+		corner(window._pill, 6)
 		local bar = New("ScrollingFrame", {
 			Position = UDim2.fromOffset(10, 0),
 			Size = UDim2.new(1, -20, 1, 0),
@@ -4790,6 +5475,11 @@ function Library:CreateWindow(opts)
 
 	for _, b in opts.Badges or {} do
 		window:AddBadge(b)
+	end
+
+	if opts.Visible == false then
+		holder.Visible = false
+		window.Opened = false
 	end
 
 	table.insert(self.Windows, window)
@@ -4832,6 +5522,47 @@ function Window:SetSubtitle(t)
 	self._subtitle.Text = t
 end
 
+-- Glides the selection pill to a tab's button.
+--   mode "wait": place instantly after layout has run (first tab)
+--   mode "snap": place instantly now (button resized)
+--   otherwise  : animate
+function Window:_movePill(tab, mode)
+	local pill = self._pill
+	if not pill then
+		return
+	end
+	local btn = tab.Button
+	local function place(animate)
+		if not btn.Parent or not pill.Parent or self.Active ~= tab then
+			return
+		end
+		local s = self._scale and self._scale.Scale or 1
+		if s <= 0 then
+			s = 1
+		end
+		local p = (btn.AbsolutePosition - pill.Parent.AbsolutePosition) / s
+		local sz = btn.AbsoluteSize / s
+		local pos, size = UDim2.fromOffset(p.X, p.Y), UDim2.fromOffset(sz.X, sz.Y)
+		if animate then
+			self._pillBusy = os.clock() + 0.45
+			tween(pill, { Position = pos, Size = size }, 0.4, Enum.EasingStyle.Quint)
+		else
+			pill.Position, pill.Size = pos, size
+		end
+	end
+	if mode == "wait" then
+		task.spawn(function()
+			RunService.RenderStepped:Wait()
+			RunService.RenderStepped:Wait()
+			place(false)
+		end)
+	elseif mode == "snap" then
+		place(false)
+	else
+		place(true)
+	end
+end
+
 --- Window:CreateTab({ Name = "Combat", Icon = "swords", Warning = { Title, Text } })
 function Window:CreateTab(opts)
 	if type(opts) == "string" then
@@ -4844,13 +5575,12 @@ function Window:CreateTab(opts)
 		btn = New("TextButton", {
 			Name = "Tab_" .. tostring(opts.Name),
 			Size = UDim2.fromOffset(40, 40),
-			BackgroundColor3 = "@Element",
 			BackgroundTransparency = 1,
+			ClipsDescendants = true,
 			LayoutOrder = #self.Tabs + 1,
 			Parent = self._bar,
 		})
 		corner(btn, 10)
-		local st = stroke(btn, "@Accent", 1, 1)
 		local ic
 		if opts.Icon then
 			ic = icon(btn, opts.Icon, 18, "@SubText", { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5) })
@@ -4890,69 +5620,65 @@ function Window:CreateTab(opts)
 				paint(Library.Theme.SubText)
 			end
 		end)
+		-- the sliding pill carries the background + outline; the tab only recolors its icon
 		function tab:_setSelected(on)
-			tween(btn, { BackgroundTransparency = on and 0 or 1 }, 0.15)
-			tween(st, { Transparency = on and 0.1 or 1 }, 0.15)
 			paint(on and Library.Theme.Text or Library.Theme.SubText)
 		end
 		tab.Button = btn
 	else
-	-- button
-	btn = New("TextButton", {
-		Name = "Tab_" .. tostring(opts.Name),
-		Size = UDim2.fromOffset(0, 26),
-		AutomaticSize = Enum.AutomaticSize.X,
-		BackgroundColor3 = "@Checkbox",
-		BackgroundTransparency = 1,
-		LayoutOrder = #self.Tabs + 1,
-		Parent = self._bar,
-	})
-	corner(btn, 6)
-	local inner = New("Frame", { Size = UDim2.new(0, 0, 1, 0), AutomaticSize = Enum.AutomaticSize.X, Parent = btn })
-	pad(inner, 10, 0, 10, 0)
-	list(inner, 6, Enum.FillDirection.Horizontal, nil, Enum.VerticalAlignment.Center)
-	if opts.Icon then
-		icon(inner, opts.Icon, 13, "@SubText", { LayoutOrder = 1 })
-	end
-	local lbl = New("TextLabel", {
-		Size = UDim2.fromOffset(0, 26),
-		AutomaticSize = Enum.AutomaticSize.X,
-		Text = opts.Name or "Tab",
-		FontFace = FONT_SEMI,
-		TextColor3 = "@SubText",
-		LayoutOrder = 2,
-		Parent = inner,
-	})
-	local underline = New("Frame", {
-		AnchorPoint = Vector2.new(0.5, 1),
-		Position = UDim2.fromScale(0.5, 1),
-		Size = UDim2.new(0, 0, 0, 2),
-		BackgroundTransparency = 1,
-		Parent = btn,
-	})
-	accentGradient(underline, 0)
-	underline.BackgroundTransparency = 1
-	corner(underline, 1)
-	tab.Button = btn
-
-	btn.MouseEnter:Connect(function()
-		if self.Active ~= tab then
-			tween(lbl, { TextColor3 = Library.Theme.Text }, 0.1)
+		-- top tab bar button
+		btn = New("TextButton", {
+			Name = "Tab_" .. tostring(opts.Name),
+			Size = UDim2.fromOffset(0, 26),
+			AutomaticSize = Enum.AutomaticSize.X,
+			BackgroundTransparency = 1,
+			ClipsDescendants = true,
+			LayoutOrder = #self.Tabs + 1,
+			Parent = self._bar,
+		})
+		corner(btn, 6)
+		local inner = New("Frame", { Size = UDim2.new(0, 0, 1, 0), AutomaticSize = Enum.AutomaticSize.X, Parent = btn })
+		pad(inner, 10, 0, 10, 0)
+		list(inner, 6, Enum.FillDirection.Horizontal, nil, Enum.VerticalAlignment.Center)
+		if opts.Icon then
+			icon(inner, opts.Icon, 13, "@SubText", { LayoutOrder = 1 })
 		end
-	end)
-	btn.MouseLeave:Connect(function()
-		if self.Active ~= tab then
-			tween(lbl, { TextColor3 = Library.Theme.SubText }, 0.1)
-		end
-	end)
+		local lbl = New("TextLabel", {
+			Size = UDim2.fromOffset(0, 26),
+			AutomaticSize = Enum.AutomaticSize.X,
+			Text = opts.Name or "Tab",
+			FontFace = FONT_SEMI,
+			TextColor3 = "@SubText",
+			LayoutOrder = 2,
+			Parent = inner,
+		})
+		tab.Button = btn
 
-	function tab:_setSelected(on)
-		tween(btn, { BackgroundTransparency = on and 0.35 or 1 }, 0.15)
-		tween(lbl, { TextColor3 = on and selText() or Library.Theme.SubText }, 0.15)
-	end
+		btn.MouseEnter:Connect(function()
+			if self.Active ~= tab then
+				tween(lbl, { TextColor3 = Library.Theme.Text }, 0.1)
+			end
+		end)
+		btn.MouseLeave:Connect(function()
+			if self.Active ~= tab then
+				tween(lbl, { TextColor3 = Library.Theme.SubText }, 0.1)
+			end
+		end)
+
+		-- the sliding pill carries the background; the tab only recolors its label
+		function tab:_setSelected(on)
+			tween(lbl, { TextColor3 = on and selText() or Library.Theme.SubText }, 0.15)
+		end
 	end
 	btn.Activated:Connect(function()
+		ripple(btn)
 		self:SelectTab(tab)
+	end)
+	-- keep the pill glued to the button if it resizes (late icon / text layout)
+	btn:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+		if self.Active == tab and os.clock() > (self._pillBusy or 0) then
+			self:_movePill(tab, "snap")
+		end
 	end)
 
 	-- page (CanvasGroup so we can fade the whole page)
@@ -5030,24 +5756,63 @@ function Window:SelectTab(tab)
 		return
 	end
 	local prev = self.Active
-	if prev then
-		prev.Page.Visible = false
-		prev:_setSelected(false)
+	local vertical = self.Layout == "Sidebar"
+	local function offset(n)
+		return vertical and UDim2.fromOffset(0, n) or UDim2.fromOffset(n, 0)
 	end
+
+	-- pages slide in the direction of travel: later tabs enter from the right (below in a sidebar)
+	local dir = 1
+	if prev then
+		local pi, ni = table.find(self.Tabs, prev), table.find(self.Tabs, tab)
+		if pi and ni and ni < pi then
+			dir = -1
+		end
+		prev:_setSelected(false)
+		prev.Page.ZIndex = 1
+		tween(prev.Page, { GroupTransparency = 1, Position = offset(-dir * 30) }, 0.2, Enum.EasingStyle.Quint)
+		task.delay(0.22, function()
+			if self.Active ~= prev then
+				prev.Page.Visible = false
+			end
+		end)
+	end
+
 	self.Active = tab
-	tab.Page.Position = UDim2.fromOffset(0, 24)
+	tab.Page.ZIndex = 2
+	tab.Page.Position = prev and offset(dir * 30) or UDim2.fromOffset(0, 24)
 	tab.Page.GroupTransparency = 1
 	tab.Page.Visible = true
 	tween(tab.Page, { GroupTransparency = 0, Position = UDim2.fromOffset(0, 0) }, 0.42, Enum.EasingStyle.Quint)
 	tab:_setSelected(true)
+	self:_movePill(tab, prev == nil and "wait" or nil)
 end
 
+--- Show / hide with the open / close animation.
 function Window:SetVisible(v)
-	self.Instance.Visible = v
+	v = v and true or false
+	if v == self.Opened then
+		return
+	end
+	self.Opened = v
+	self._visGen = (self._visGen or 0) + 1
+	local gen = self._visGen
+	local holder = self.Instance
+	if v then
+		holder.ZIndex = Library:_nextZ()
+		holder.Visible = true
+		Library._playIn(holder)
+	else
+		Library._playOut(holder, function()
+			if self._visGen == gen and not self.Opened then
+				holder.Visible = false
+			end
+		end)
+	end
 end
 
 function Window:Toggle()
-	self.Instance.Visible = not self.Instance.Visible
+	self:SetVisible(not self.Opened)
 end
 
 function Window:Minimize()
@@ -5100,7 +5865,7 @@ function Library:CreateSubWindow(opts)
 		Parent = self.WindowLayer,
 	})
 	local main = glassFrame(holder, size)
-	local uiScale = New("UIScale", { Scale = 0.94, Parent = holder })
+	New("UIScale", { Scale = 1, Parent = holder })
 
 	main.InputBegan:Connect(function(input)
 		if input.UserInputType == MB1 or input.UserInputType == TOUCH then
@@ -5172,8 +5937,7 @@ function Library:CreateSubWindow(opts)
 		self.Opened = true
 		holder.ZIndex = Library:_nextZ()
 		holder.Visible = true
-		uiScale.Scale = 0.88
-		tween(uiScale, { Scale = 1 }, 0.42, Enum.EasingStyle.Back)
+		Library._playIn(holder)
 	end
 
 	function sw:Close()
@@ -5181,8 +5945,7 @@ function Library:CreateSubWindow(opts)
 			return
 		end
 		self.Opened = false
-		tween(uiScale, { Scale = 0.9 }, 0.16)
-		task.delay(0.14, function()
+		Library._playOut(holder, function()
 			if not self.Opened and present() then
 				holder.Visible = false
 			end
@@ -5253,7 +6016,9 @@ function Library:CreateSubWindow(opts)
 			sw:Close()
 		end, "Danger", 3)
 	end
-	makeDraggable(header, holder)
+	makeDraggable(header, holder, { Locked = function()
+		return sw._maximized
+	end })
 	if opts.Resizable ~= false and Library.Resizable then
 		sw._resize = makeResizable(holder, {
 			MinSize = opts.MinSize or Vector2.new(220, 120),
@@ -5478,7 +6243,8 @@ function Library:BuildThemeSection(container, opts)
 			Flag = flag,
 			Default = self.Theme[key],
 			Callback = function(c)
-				self:SetTheme({ [key] = c })
+				-- instant: a picker drag fires every frame, a fade would only lag behind it
+				self:SetTheme({ [key] = c }, true)
 			end,
 		})
 	end
@@ -5499,7 +6265,7 @@ function Library:BuildThemeSection(container, opts)
 		Default = self.Theme.BackgroundAngle,
 		Suffix = " deg",
 		Callback = function(v)
-			self:SetTheme({ BackgroundAngle = v })
+			self:SetTheme({ BackgroundAngle = v }, true)
 		end,
 	})
 	container:AddToggle({
@@ -5517,6 +6283,45 @@ function Library:BuildThemeSection(container, opts)
 		Tooltip = "Applies to windows created after changing it.",
 		Callback = function(on)
 			self.Glass = on
+		end,
+	})
+
+	-- motion settings
+	container:AddDropdown({
+		Name = "Window drag style",
+		Flag = "ui_drag_style",
+		Options = table.clone(self.DragStyles),
+		Default = self.DragStyle,
+		Callback = function(style)
+			self:SetDragStyle(style)
+		end,
+	})
+	container:AddToggle({
+		Name = "Window open / close animation",
+		Flag = "ui_window_anim",
+		Default = self.WindowAnimation,
+		Callback = function(on)
+			self.WindowAnimation = on
+		end,
+	})
+	container:AddToggle({
+		Name = "Click ripples",
+		Flag = "ui_ripples",
+		Default = self.Ripples,
+		Callback = function(on)
+			self.Ripples = on
+		end,
+	})
+	container:AddSlider({
+		Name = "Theme fade time",
+		Flag = "ui_theme_fade",
+		Min = 0,
+		Max = 1,
+		Increment = 0.05,
+		Default = self.ThemeFade,
+		Suffix = " s",
+		Callback = function(v)
+			self.ThemeFade = v
 		end,
 	})
 
