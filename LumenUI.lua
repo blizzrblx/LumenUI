@@ -13,6 +13,18 @@
 	* Config save / load / import / export
 	* Icons through Footagesus/Icons (Main-v2.lua) with safe fallbacks
 
+	v1.4.0 - scaling / alignment / theming pass
+		* One scale for the whole UI: Library.Scale x auto-fit (Library:SetScale / :SetAutoScale). Drag, resize,
+		  tooltips, ripples and toasts all work in scale-independent layer units, so nothing drifts or jumps.
+		* Windows are shrunk / nudged back on screen when the viewport or scale changes (no more cut-off UI);
+		  headers, tab columns, toasts and the dock adapt to small screens.
+		* Drag stand-ins now sit exactly under the cursor (only the floaty "Lift" style trails it).
+		* Colour picker rebuilt: unclipped knob pinned to the cursor, RGB / hex inputs, copy, recent colours.
+		* Themes repaint everything, including hover / selected states and rich-text HUD pieces
+		  (Library.ThemeChanged, Library:RegisterTheme / ExportTheme / ImportTheme, 5 new presets).
+		* Optional cursor decoration: Library:SetCursor({ Style = "Ring" | "Dot" | "Crosshair" | "Plus" }).
+		* Library.PointerOffset (Vector2) is a manual escape hatch if an executor reports a shifted cursor.
+
 	v1.3.0 - motion update (ideas ported from Airflow UI, Starlight Gen2 and LinoriaLib)
 	* Drag styles: Outline / Brackets / Ghost / Frame stand-ins that follow the cursor while the
 	  window glides into place on release, "Lift" (pop + shadow + optional tilt) and "Off"
@@ -46,7 +58,7 @@ local MOVE = Enum.UserInputType.MouseMovement
 --------------------------------------------------------------------------------
 
 local Library = {
-	Version = "1.3.0",
+	Version = "1.4.0",
 
 	-- Library.Flags[flagName] -> element object (has .Value, :Set(), :Get(), .Changed, ...)
 	Flags = {},
@@ -89,6 +101,15 @@ local Library = {
 	Resizable = true,
 	-- spring stiffness of the resize glide (higher = snappier, 0 = follow the cursor exactly)
 	ResizeStiffness = 20,
+	-- UI scale: final scale = Scale x (auto-fit when AutoScale is on)
+	Scale = 1,
+	AutoScale = true,
+	MinScale = 0.4,
+	MaxScale = 3,
+	SafeArea = true, -- phones: keep notches / home bars clear
+	PointerOffset = Vector2.zero, -- added to every pointer reading (manual fix for shifted cursors)
+	-- Cursor decoration (see Library:SetCursor)
+	Cursor = { Enabled = false, Style = "Ring", Size = 20, HideSystem = true, Pulse = true },
 
 	-- seconds a theme change takes to cross-fade (0 = instant)
 	ThemeFade = 0.35,
@@ -137,6 +158,7 @@ local Library = {
 }
 Library.__index = Library
 
+Library.Theme.AccentLight = Library.Theme.Accent:Lerp(Color3.new(1, 1, 1), 0.4)
 local DEFAULT_THEME = table.clone(Library.Theme)
 Library.Themes = {}
 local function addPreset(name, over)
@@ -147,6 +169,7 @@ local function addPreset(name, over)
 	if over.Checkbox == nil then
 		t.Checkbox = over.ElementHover or t.Checkbox
 	end
+	t.AccentLight = t.Accent:Lerp(Color3.new(1, 1, 1), 0.4)
 	Library.Themes[name] = t
 end
 addPreset("Starlight", {})
@@ -188,13 +211,51 @@ addPreset("Ocean", {
 	Accent = Color3.fromRGB(60, 170, 255), Accent2 = Color3.fromRGB(100, 110, 255),
 })
 
+addPreset("Sakura", {
+	Background = Color3.fromRGB(40, 22, 32), Background2 = Color3.fromRGB(14, 8, 12), BackgroundAngle = 135,
+	Panel = Color3.fromRGB(46, 26, 38), Panel2 = Color3.fromRGB(20, 11, 16),
+	Element = Color3.fromRGB(58, 32, 46), ElementHover = Color3.fromRGB(80, 44, 64),
+	Stroke = Color3.fromRGB(104, 56, 82),
+	Accent = Color3.fromRGB(255, 134, 184), Accent2 = Color3.fromRGB(255, 182, 140),
+})
+addPreset("Amber", {
+	Background = Color3.fromRGB(36, 26, 10), Background2 = Color3.fromRGB(10, 8, 4), BackgroundAngle = 135,
+	Panel = Color3.fromRGB(42, 30, 12), Panel2 = Color3.fromRGB(18, 13, 6),
+	Element = Color3.fromRGB(54, 40, 16), ElementHover = Color3.fromRGB(76, 56, 22),
+	Stroke = Color3.fromRGB(98, 72, 28),
+	Accent = Color3.fromRGB(255, 184, 48), Accent2 = Color3.fromRGB(255, 120, 48),
+})
+addPreset("Nord", {
+	Background = Color3.fromRGB(46, 52, 64), Background2 = Color3.fromRGB(30, 34, 42), BackgroundAngle = 120,
+	Panel = Color3.fromRGB(52, 59, 72), Panel2 = Color3.fromRGB(36, 41, 51),
+	Element = Color3.fromRGB(59, 66, 82), ElementHover = Color3.fromRGB(67, 76, 94),
+	Stroke = Color3.fromRGB(76, 86, 106),
+	Text = Color3.fromRGB(236, 239, 244), SubText = Color3.fromRGB(167, 177, 196),
+	Accent = Color3.fromRGB(136, 192, 208), Accent2 = Color3.fromRGB(129, 161, 193),
+})
+addPreset("Dracula", {
+	Background = Color3.fromRGB(40, 42, 54), Background2 = Color3.fromRGB(24, 25, 33), BackgroundAngle = 135,
+	Panel = Color3.fromRGB(46, 48, 62), Panel2 = Color3.fromRGB(30, 31, 41),
+	Element = Color3.fromRGB(56, 58, 76), ElementHover = Color3.fromRGB(68, 71, 90),
+	Stroke = Color3.fromRGB(88, 92, 118),
+	Text = Color3.fromRGB(248, 248, 242), SubText = Color3.fromRGB(170, 174, 200),
+	Accent = Color3.fromRGB(189, 147, 249), Accent2 = Color3.fromRGB(255, 121, 198),
+})
+addPreset("Cyber", {
+	Background = Color3.fromRGB(10, 12, 26), Background2 = Color3.fromRGB(4, 4, 12), BackgroundAngle = 150,
+	Panel = Color3.fromRGB(14, 16, 34), Panel2 = Color3.fromRGB(7, 8, 18),
+	Element = Color3.fromRGB(20, 24, 48), ElementHover = Color3.fromRGB(28, 34, 68),
+	Stroke = Color3.fromRGB(30, 70, 100),
+	Accent = Color3.fromRGB(0, 238, 255), Accent2 = Color3.fromRGB(255, 0, 170),
+})
+
 local function gl(v)
 	return Library.Glass and v or 0
 end
 
 -- light tint of the accent (selected tab / sub-tab text, active dock icon)
 local function selText()
-	return Library.Theme.Accent:Lerp(Color3.new(1, 1, 1), 0.4)
+	return Library.Theme.AccentLight or Library.Theme.Accent:Lerp(Color3.new(1, 1, 1), 0.4)
 end
 
 local FONT_REG = Font.new("rbxasset://fonts/families/GothamSSm.json", Enum.FontWeight.Medium)
@@ -236,14 +297,75 @@ local function reducedMotion()
 	return ok and r == true
 end
 
+-- Theme bindings live here (declared early so tween() can keep state colours theme-aware).
+-- themed[inst][prop] = themeKey ; shownTheme = what is on screen right now (mid cross-fade it lags Library.Theme)
+local themed = setmetatable({}, { __mode = "k" })
+local shownTheme = table.clone(DEFAULT_THEME)
+
+-- When two theme keys hold the same colour the first one in this list wins (Accent before Accent2 ...)
+local THEME_KEYS = {
+	"Accent", "AccentLight", "Text", "SubText", "Muted", "Stroke", "Checkbox", "Element", "ElementHover",
+	"Panel", "Background", "Success", "Warning", "Danger", "Accent2", "Panel2", "Background2", "Shadow",
+}
+
+local function themeKeyOf(c)
+	local T = Library.Theme
+	for _, k in THEME_KEYS do
+		if T[k] == c then
+			return k
+		end
+	end
+	return nil
+end
+
+--[[
+	tween(inst, props, time, style, dir)
+	Colour tweens aimed at a theme colour (hover / selected / pressed states ...) re-bind the property to that
+	theme key, so a later theme change repaints the *current* state instead of leaving a stale colour behind.
+]]
 local function tween(inst, props, time, style, dir)
 	local t = reducedMotion() and 0 or (time or 0.15)
+	local rebound
+	local bound = themed[inst]
+	if bound then
+		for prop, value in props do
+			if bound[prop] ~= nil and typeof(value) == "Color3" then
+				local key = themeKeyOf(value)
+				bound[prop] = key -- nil = a one-off colour, stop following the theme
+				if key then
+					rebound = rebound or {}
+					rebound[prop] = key
+				end
+			end
+		end
+	end
 	local tw = TweenService:Create(
 		inst,
 		TweenInfo.new(t, style or Enum.EasingStyle.Quart, dir or Enum.EasingDirection.Out),
 		props
 	)
 	tw:Play()
+	if rebound then
+		-- the theme may have changed while the tween was running: land on the current colour
+		local conn
+		conn = tw.Completed:Connect(function()
+			conn:Disconnect()
+			local b = themed[inst]
+			if not b then
+				return
+			end
+			for prop, key in rebound do
+				if b[prop] == key then
+					local c = shownTheme[key] or Library.Theme[key]
+					if typeof(c) == "Color3" then
+						pcall(function()
+							inst[prop] = c
+						end)
+					end
+				end
+			end
+		end)
+	end
 	return tw
 end
 
@@ -266,9 +388,9 @@ end
 local function pointerPos(input)
 	if input.UserInputType == TOUCH then
 		local inset = GuiService:GetGuiInset()
-		return Vector2.new(input.Position.X, input.Position.Y) + inset
+		return Vector2.new(input.Position.X, input.Position.Y) + inset + (Library.PointerOffset or Vector2.zero)
 	end
-	return UserInputService:GetMouseLocation()
+	return UserInputService:GetMouseLocation() + (Library.PointerOffset or Vector2.zero)
 end
 
 local function isShown(gui)
@@ -280,6 +402,58 @@ local function isShown(gui)
 		cur = cur.Parent
 	end
 	return cur ~= nil and cur.Enabled
+end
+
+--------------------------------------------------------------------------------
+-- Scale / pointer helpers
+--
+-- The library draws into five "layers" that all carry one UIScale (Library.Scale x auto-fit), so
+-- every offset inside a layer is a *layer unit*, not a screen pixel:
+--     screen pixels = layer units * layerScale()
+-- Window holders add their own UIScale on top for the open / close pop. scaleOf(gui) returns the
+-- full product for anything that lives inside `gui`.
+--------------------------------------------------------------------------------
+
+local function scaleOf(gui)
+	local s = 1
+	local cur = gui
+	while cur and not cur:IsA("ScreenGui") do
+		local sc = cur:FindFirstChildOfClass("UIScale")
+		if sc then
+			s *= sc.Scale
+		end
+		cur = cur.Parent
+	end
+	return math.max(s, 0.01)
+end
+
+-- what one layer unit is worth in screen pixels
+local function layerScale()
+	return Library._layerScale or 1
+end
+
+-- top-left of the library's ScreenGui in screen space (zero unless a safe-area inset is active)
+local function guiOrigin()
+	local g = Library.Gui
+	return g and g.AbsolutePosition or Vector2.zero
+end
+
+-- the visible area, in layer units
+local function screenUnits()
+	local g = Library.Gui
+	local size = g and g.AbsoluteSize or Vector2.new(1920, 1080)
+	if size.X < 2 and workspace.CurrentCamera then
+		size = workspace.CurrentCamera.ViewportSize
+	end
+	return size / layerScale()
+end
+
+-- the pointer in screen space (mouse, or the last touch on touch-only devices)
+local function currentPointer()
+	if Library._lastTouch and Library._ptr then
+		return Library._ptr
+	end
+	return UserInputService:GetMouseLocation() + (Library.PointerOffset or Vector2.zero)
 end
 
 --------------------------------------------------------------------------------
@@ -319,7 +493,7 @@ end
 -- Theme binding + instance factory
 --------------------------------------------------------------------------------
 
-local themed = setmetatable({}, { __mode = "k" })
+Library.ThemeChanged = Signal.new()
 local accentGradients = setmetatable({}, { __mode = "k" })
 
 local function bind(inst, prop, key)
@@ -478,8 +652,9 @@ local function ripple(button, color)
 	if not Library.Ripples or reducedMotion() or not button or not button.Parent then
 		return
 	end
-	local mouse = UserInputService:GetMouseLocation()
-	local abs, size = button.AbsolutePosition, button.AbsoluteSize
+	local mouse = currentPointer()
+	local k = scaleOf(button) -- screen px per unit inside the button (window / layer / press scales)
+	local abs, size = button.AbsolutePosition, button.AbsoluteSize / k
 	local diameter = math.max(size.X, size.Y) * 2.2
 	local circle = table.remove(ripplePool)
 	-- a pooled circle can't be reparented if it was destroyed along the way
@@ -497,7 +672,7 @@ local function ripple(button, color)
 		})
 		New("UICorner", { CornerRadius = UDim.new(1, 0), Parent = circle })
 	end
-	circle.Position = UDim2.fromOffset(mouse.X - abs.X, mouse.Y - abs.Y)
+	circle.Position = UDim2.fromOffset((mouse.X - abs.X) / k, (mouse.Y - abs.Y) / k)
 	circle.Size = UDim2.fromOffset(0, 0)
 	circle.BackgroundColor3 = color or Library.Theme.Accent
 	circle.BackgroundTransparency = 0.8
@@ -676,33 +851,62 @@ end
 
 -- What is currently on screen. A theme change cross-fades from this to Library.Theme in ONE
 -- Heartbeat loop (ported from Airflow UI) instead of creating a tween per object.
-local shownTheme = table.clone(DEFAULT_THEME)
 local themeDriver = nil
 
-local function paintTheme(colors)
+local function assign(inst, prop, value)
+	inst[prop] = value
+end
+
+local themeHooks = {}
+
+-- Repaints every theme-bound property + gradient. One bad instance can never abort the whole repaint.
+local function paintTheme(colors, final)
 	for inst, props in themed do
 		for prop, key in props do
 			local c = colors[key]
 			if typeof(c) == "Color3" then
-				inst[prop] = c
+				pcall(assign, inst, prop, c)
 			end
 		end
 	end
 	local seq = ColorSequence.new(colors.Accent, colors.Accent2)
 	for g in accentGradients do
-		g.Color = seq
+		pcall(assign, g, "Color", seq)
 	end
 	for g, keys in themeGradients do
-		g.Color = ColorSequence.new(colors[keys[1]], colors[keys[2]])
+		local a, b = colors[keys[1]], colors[keys[2]]
+		if typeof(a) == "Color3" and typeof(b) == "Color3" then
+			pcall(assign, g, "Color", ColorSequence.new(a, b))
+		end
+	end
+	if final then
+		for fn in themeHooks do
+			pcall(fn, colors)
+		end
+	end
+end
+
+--- Library:_onTheme(fn): fn(colors) runs once after every finished theme change. Use it for colours that are
+--- baked into text (rich-text HUD pieces). Returns a function that removes the hook.
+function Library:_onTheme(fn)
+	themeHooks[fn] = true
+	return function()
+		themeHooks[fn] = nil
 	end
 end
 
 --- Library:SetTheme({ Accent = Color3, Accent2 = Color3, Background = Color3, ... }, instant?)
 --- Cross-fades over Library.ThemeFade seconds. Pass instant = true to skip the fade
---- (used while dragging color pickers).
+--- (used while dragging color pickers). Fires Library.ThemeChanged.
 function Library:SetTheme(new, instant)
+	if type(new) ~= "table" then
+		return
+	end
 	for k, v in new do
 		self.Theme[k] = v
+	end
+	if new.Accent ~= nil and new.AccentLight == nil then
+		self.Theme.AccentLight = self.Theme.Accent:Lerp(Color3.new(1, 1, 1), 0.4)
 	end
 	if new.BackgroundAngle then
 		for g in mainGradients do
@@ -713,6 +917,7 @@ function Library:SetTheme(new, instant)
 		themeDriver:Disconnect()
 		themeDriver = nil
 	end
+	self.ThemeChanged:Fire(self.Theme)
 
 	local from = {}
 	for k, target in self.Theme do
@@ -730,7 +935,7 @@ function Library:SetTheme(new, instant)
 		for k, v in self.Theme do
 			shownTheme[k] = v
 		end
-		paintTheme(self.Theme)
+		paintTheme(self.Theme, true)
 	end
 	if duration <= 0 or next(from) == nil then
 		finish()
@@ -753,15 +958,86 @@ function Library:SetTheme(new, instant)
 			colors[k] = c
 			shownTheme[k] = c
 		end
-		paintTheme(colors)
+		paintTheme(colors, false)
 	end)
 end
 
---- Apply a preset by name: "Midnight", "Hidden", "Illusionary", "Crimson", "Emerald", "Ocean" (+ your own in Library.Themes)
+--- Apply a preset by name ("Starlight", "Midnight", "Hidden", "Illusionary", "Crimson", "Emerald", "Ocean",
+--- "Sakura", "Amber", "Nord", "Dracula", "Cyber" + your own in Library.Themes)
 function Library:ApplyThemePreset(name)
 	local t = self.Themes[name]
 	if not t then
 		return false
+	end
+	self:SetTheme(t)
+	self.ThemeName = name
+	return true
+end
+
+--- Library:RegisterTheme("My theme", { Background = ..., Accent = ... })  (missing keys fall back to Starlight)
+function Library:RegisterTheme(name, colors)
+	local t = table.clone(DEFAULT_THEME)
+	for k, v in colors do
+		t[k] = v
+	end
+	if colors.Checkbox == nil then
+		t.Checkbox = colors.ElementHover or t.Checkbox
+	end
+	if colors.AccentLight == nil then
+		t.AccentLight = t.Accent:Lerp(Color3.new(1, 1, 1), 0.4)
+	end
+	self.Themes[name] = t
+	return t
+end
+
+function Library:GetTheme()
+	return table.clone(self.Theme)
+end
+
+function Library:GetThemeNames()
+	local out = {}
+	for k in self.Themes do
+		table.insert(out, k)
+	end
+	table.sort(out)
+	return out
+end
+
+--- Library:ExportTheme() -> JSON string ({ "Accent": "#9F96C1", ... })
+function Library:ExportTheme()
+	local out = {}
+	for k, v in self.Theme do
+		if typeof(v) == "Color3" then
+			out[k] = toHex(v)
+		elseif type(v) == "number" then
+			out[k] = v
+		end
+	end
+	return HttpService:JSONEncode(out)
+end
+
+--- Library:ImportTheme(jsonString, saveAsName?) -> ok, err
+function Library:ImportTheme(str, name)
+	local ok, tb = pcall(HttpService.JSONDecode, HttpService, tostring(str))
+	if not ok or type(tb) ~= "table" then
+		return false, "Invalid theme string"
+	end
+	local t = {}
+	for k, v in tb do
+		if type(v) == "string" and v:sub(1, 1) == "#" then
+			local c = fromHex(v)
+			if c then
+				t[k] = c
+			end
+		elseif type(v) == "number" and k == "BackgroundAngle" then
+			t[k] = v
+		end
+	end
+	if next(t) == nil then
+		return false, "No colours found in that string"
+	end
+	if name and name ~= "" then
+		self:RegisterTheme(name, t)
 	end
 	self:SetTheme(t)
 	return true
@@ -805,11 +1081,29 @@ function Library:_Gui()
 	gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 	gui.DisplayOrder = 1000
 	gui.IgnoreGuiInset = true
+	if self.SafeArea and UserInputService.TouchEnabled then
+		-- keep notches / home bars off the UI on phones (all pointer maths subtracts the gui origin)
+		pcall(function()
+			gui.ScreenInsets = Enum.ScreenInsets.DeviceSafeInsets
+		end)
+	end
 	gui.Parent = self.Parent or (LocalPlayer and LocalPlayer:WaitForChild("PlayerGui"))
 	self.Gui = gui
+	self._scaled = {}
+	self._layerScale = nil
 
-	-- Layers (ZIndex orders them): HUD < windows < drag stand-ins < toasts < tooltip
-	self.BackdropLayer = New("Frame", { Name = "Backdrop", Size = UDim2.fromScale(1, 1), ZIndex = 0, Parent = gui })
+	-- Layers (ZIndex orders them): backdrop < HUD < windows < drag stand-ins < toasts < tooltip < cursor.
+	-- Scaled layers carry one UIScale and are sized 1/scale so they still cover the whole screen.
+	local function layer(name, z, scaled)
+		local f = New("Frame", { Name = name, Size = UDim2.fromScale(1, 1), ZIndex = z, Parent = gui })
+		if scaled then
+			New("UIScale", { Name = "LayerScale", Parent = f })
+			table.insert(self._scaled, f)
+		end
+		return f
+	end
+
+	self.BackdropLayer = layer("Backdrop", 0, false)
 	self._bdDim = New("Frame", {
 		Name = "Dim",
 		Size = UDim2.fromScale(1, 1),
@@ -826,22 +1120,342 @@ function Library:_Gui()
 		ZIndex = 1,
 		Parent = self.BackdropLayer,
 	})
-	self.HudLayer = New("Frame", { Name = "Hud", Size = UDim2.fromScale(1, 1), ZIndex = 1, Parent = gui })
-	self.WindowLayer = New("Frame", { Name = "Windows", Size = UDim2.fromScale(1, 1), ZIndex = 2, Parent = gui })
-	self.DragLayer = New("Frame", { Name = "DragStandIns", Size = UDim2.fromScale(1, 1), ZIndex = 3, Parent = gui })
-	self.ToastLayer = New("Frame", { Name = "Toasts", Size = UDim2.fromScale(1, 1), ZIndex = 4, Parent = gui })
-	self.TipLayer = New("Frame", { Name = "Tooltips", Size = UDim2.fromScale(1, 1), ZIndex = 5, Parent = gui })
+	self.HudLayer = layer("Hud", 1, true)
+	self.WindowLayer = layer("Windows", 2, true)
+	self.DragLayer = layer("DragStandIns", 3, true)
+	self.ToastLayer = layer("Toasts", 4, true)
+	self.TipLayer = layer("Tooltips", 5, true)
+	self.CursorLayer = layer("Cursor", 6, false)
 
 	self:_setupInput()
 	self:_global(RunService.RenderStepped, function(dt)
 		self:_backdropStep(dt)
+		self:_cursorStep(dt)
 		if self.AnimateGradient then
 			for g in mainGradients do
 				g.Rotation = (g.Rotation + dt * 10) % 360
 			end
 		end
 	end)
+	self:_global(gui:GetPropertyChangedSignal("AbsoluteSize"), function()
+		self:_updateScale()
+	end)
+	self:_updateScale()
+	self:_cursorBuild()
 	return gui
+end
+
+--------------------------------------------------------------------------------
+-- UI scale (user scale x auto-fit) + keeping windows on screen
+--------------------------------------------------------------------------------
+
+--- Final scale = Library.Scale, times (when AutoScale is on) a shrink so the biggest default window still fits
+--- small screens / phones and a gentle boost on very large (1440p+/4K) displays.
+function Library:_computeScale()
+	local user = clamp(tonumber(self.Scale) or 1, 0.25, 4)
+	local gui = self.Gui
+	if not gui or not self.AutoScale then
+		return clamp(user, self.MinScale or 0.4, self.MaxScale or 3)
+	end
+	local size = gui.AbsoluteSize
+	if size.X < 2 or size.Y < 2 then
+		local cam = workspace.CurrentCamera
+		size = cam and cam.ViewportSize or Vector2.new(1920, 1080)
+	end
+	local fit = math.min(1, (size.Y - 24) / 560, (size.X - 24) / 600)
+	fit = math.max(fit, 0.4)
+	local up = clamp(size.Y / 1440, 1, 2)
+	return clamp(user * fit * up, self.MinScale or 0.4, self.MaxScale or 3)
+end
+
+function Library:_updateScale()
+	local gui = self.Gui
+	if not gui or not self._scaled then
+		return
+	end
+	local s = self:_computeScale()
+	self._layerScale = s
+	for _, f in self._scaled do
+		local sc = f:FindFirstChild("LayerScale")
+		if sc then
+			sc.Scale = s
+		end
+		f.Size = UDim2.fromScale(1 / s, 1 / s)
+	end
+	if self._reflowers then
+		for frame, fn in self._reflowers do
+			pcall(fn, frame)
+		end
+	end
+	self:_constrainAll()
+end
+
+--- Library:SetScale(1.25)  -> user scale (0.5 - 2.5). Auto-fit still applies on top while AutoScale is on.
+function Library:SetScale(n)
+	self.Scale = clamp(tonumber(n) or 1, 0.5, 2.5)
+	self:_updateScale()
+end
+
+--- Library:SetAutoScale(false) -> use exactly Library.Scale (no shrink-to-fit / big-screen boost)
+function Library:SetAutoScale(on)
+	self.AutoScale = on and true or false
+	self:_updateScale()
+end
+
+--- the scale layers are drawn at right now
+function Library:GetScale()
+	return self._layerScale or self:_computeScale()
+end
+
+-- Library:_track(frame, fn): fn(frame) places a frame, and runs again whenever the scale / viewport changes.
+-- (Frames the user dragged by hand keep their spot: makeDraggable flags them with the LumenMoved attribute.)
+function Library:_track(frame, fn)
+	self._reflowers = self._reflowers or setmetatable({}, { __mode = "k" })
+	self._reflowers[frame] = function(f)
+		if f:GetAttribute("LumenMoved") then
+			return
+		end
+		fn(f)
+	end
+	fn(frame)
+end
+
+-- height of the Roblox top bar in layer units (HUD pieces sit below it)
+function Library:_topInset()
+	return GuiService:GetGuiInset().Y / layerScale()
+end
+
+--- Library:_register(holder, { State = fn -> "min" | "max" | nil, OnSize = fn(Vector2) })
+--- Registered windows are shrunk / nudged back on screen whenever the viewport or scale changes.
+function Library:_register(holder, info)
+	self._fit = self._fit or setmetatable({}, { __mode = "k" })
+	self._fit[holder] = info or {}
+end
+
+function Library:_constrain(holder, instant)
+	local gui = self.Gui
+	if not gui or not holder or not holder.Parent or not holder.Visible then
+		return
+	end
+	local info = self._fit and self._fit[holder]
+	if not info then
+		return -- only registered windows are kept on screen
+	end
+	local state = info.State and info.State() or nil
+	if state == "max" then
+		return
+	end
+	local absSize = holder.AbsoluteSize
+	if absSize.X < 2 or absSize.Y < 2 then
+		return
+	end
+	local k = layerScale()
+	local sc = holder:FindFirstChildOfClass("UIScale")
+	local own = sc and math.max(sc.Scale, 0.01) or 1
+	local avail = gui.AbsoluteSize / k
+	local margin = 8
+	local anchor = holder.AnchorPoint
+	local nominal = absSize / (k * own) -- the size the window "wants", ignoring the pop animation
+
+	local newSize = Vector2.new(
+		math.min(nominal.X, math.max(avail.X - margin * 2, 120)),
+		state == "min" and nominal.Y or math.min(nominal.Y, math.max(avail.Y - margin * 2, 80))
+	)
+	-- anchor point in layer units: unaffected by the window's own UIScale
+	local anchorPos = (holder.AbsolutePosition + anchor * absSize - guiOrigin()) / k
+	local tl = anchorPos - anchor * newSize
+	local want = Vector2.new(
+		clamp(tl.X, margin, math.max(margin, avail.X - newSize.X - margin)),
+		clamp(tl.Y, margin, math.max(margin, avail.Y - newSize.Y - margin))
+	)
+	local resized = (newSize - nominal).Magnitude > 0.5
+	local d = want - tl
+	local moved = d.Magnitude > 0.5
+	if not resized and not moved then
+		return
+	end
+	local p = holder.Position
+	local props = { Position = UDim2.new(p.X.Scale, p.X.Offset + d.X, p.Y.Scale, p.Y.Offset + d.Y) }
+	if resized then
+		props.Size = UDim2.fromOffset(newSize.X, newSize.Y)
+		if state ~= "min" and info.OnSize then
+			info.OnSize(newSize)
+		end
+	end
+	if instant or reducedMotion() then
+		for prop, v in props do
+			holder[prop] = v
+		end
+	else
+		tween(holder, props, 0.25, Enum.EasingStyle.Quint)
+	end
+end
+
+-- waits a frame so AbsoluteSize / AbsolutePosition are fresh, then constrains
+function Library:_constrainSoon(holder, instant)
+	task.spawn(function()
+		RunService.RenderStepped:Wait()
+		self:_constrain(holder, instant)
+	end)
+end
+
+function Library:_constrainAll()
+	if not self._fit then
+		return
+	end
+	for holder in self._fit do
+		self:_constrainSoon(holder, true)
+	end
+end
+
+--------------------------------------------------------------------------------
+-- Cursor decoration (optional ring / dot / crosshair that follows the real cursor exactly)
+--------------------------------------------------------------------------------
+
+Library.CursorStyles = { "Ring", "Dot", "Crosshair", "Plus" }
+
+--- Library:SetCursor({ Enabled = true, Style = "Ring" | "Dot" | "Crosshair" | "Plus", Size = 20,
+---                     HideSystem = true, Pulse = true })   /   Library:SetCursor(true | false)
+--- (a table without Enabled only changes the listed options)
+function Library:SetCursor(opts)
+	local c = self.Cursor
+	if opts == false then
+		c.Enabled = false
+	elseif type(opts) == "table" then
+		for k, v in opts do
+			c[k] = v
+		end
+	else
+		c.Enabled = true
+	end
+	if self.Gui then
+		self:_cursorBuild()
+	end
+end
+
+function Library:_cursorBuild()
+	if self._cursorRoot then
+		self._cursorRoot:Destroy()
+		self._cursorRoot, self._cursorPress = nil, nil
+	end
+	local c = self.Cursor
+	if not self.CursorLayer or not c.Enabled then
+		self:_cursorRefresh()
+		return
+	end
+	local size = clamp(tonumber(c.Size) or 20, 8, 64)
+	local root = New("Frame", {
+		Name = "CursorDeco",
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Size = UDim2.fromOffset(size, size),
+		ZIndex = 10,
+		Visible = false,
+		Parent = self.CursorLayer,
+	})
+	local press = New("UIScale", { Parent = root })
+
+	local function dot(px, transparency)
+		local d = New("Frame", {
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.fromScale(0.5, 0.5),
+			Size = UDim2.fromOffset(px, px),
+			BackgroundColor3 = "@Accent",
+			BackgroundTransparency = transparency or 0,
+			Parent = root,
+		})
+		corner(d, px)
+		return d
+	end
+
+	local style = c.Style
+	if style == "Dot" then
+		dot(size * 0.8, 0.82)
+		dot(6)
+	elseif style == "Crosshair" or style == "Plus" then
+		local gap = style == "Crosshair" and 4 or 0
+		local arm = size / 2 - gap
+		for _, dir in { Vector2.new(1, 0), Vector2.new(-1, 0), Vector2.new(0, 1), Vector2.new(0, -1) } do
+			local mid = gap + arm / 2
+			New("Frame", {
+				AnchorPoint = Vector2.new(0.5, 0.5),
+				Position = UDim2.new(0.5, dir.X * mid, 0.5, dir.Y * mid),
+				Size = dir.X ~= 0 and UDim2.fromOffset(arm, 2) or UDim2.fromOffset(2, arm),
+				BackgroundColor3 = "@Accent",
+				BackgroundTransparency = 0,
+				Parent = root,
+			})
+		end
+		dot(3)
+	else
+		local ring = New("Frame", {
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.fromScale(0.5, 0.5),
+			Size = UDim2.fromOffset(size, size),
+			Parent = root,
+		})
+		corner(ring, size)
+		stroke(ring, "@Accent", 2, 0.05)
+		dot(4)
+	end
+	self._cursorRoot, self._cursorPress = root, press
+	self:_cursorRefresh()
+end
+
+-- shows / hides the decoration and the system cursor to match the UI state
+function Library:_cursorRefresh()
+	local c = self.Cursor
+	local root = self._cursorRoot
+	local want = root ~= nil
+		and c.Enabled
+		and self._uiVisible ~= false
+		and not self.Unloaded
+		and UserInputService.MouseEnabled
+	if root then
+		root.Visible = want and true or false
+	end
+	pcall(function()
+		if want and c.HideSystem ~= false then
+			if self._prevIcon == nil then
+				self._prevIcon = UserInputService.MouseIconEnabled
+			end
+			UserInputService.MouseIconEnabled = false
+		elseif self._prevIcon ~= nil then
+			UserInputService.MouseIconEnabled = self._prevIcon
+			self._prevIcon = nil
+		end
+	end)
+end
+
+function Library:_cursorStep()
+	local root = self._cursorRoot
+	if not root or not root.Visible then
+		return
+	end
+	-- the layer is unscaled and starts at the gui origin, so this is exactly the hot-spot
+	local p = UserInputService:GetMouseLocation() + (self.PointerOffset or Vector2.zero) - guiOrigin()
+	root.Position = UDim2.fromOffset(p.X, p.Y)
+end
+
+function Library:_cursorPulse()
+	local root = self._cursorRoot
+	if not root or not root.Visible or not self.Cursor.Pulse then
+		return
+	end
+	local size = root.AbsoluteSize.X
+	local ring = New("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = root.Position,
+		Size = UDim2.fromOffset(size * 0.6, size * 0.6),
+		ZIndex = 9,
+		Parent = self.CursorLayer,
+	})
+	corner(ring, 100)
+	local st = stroke(ring, "@Accent", 2, 0.2)
+	tween(ring, { Size = UDim2.fromOffset(size * 1.9, size * 1.9) }, 0.4, Enum.EasingStyle.Quint)
+	tween(st, { Transparency = 1 }, 0.4)
+	task.delay(0.45, function()
+		ring:Destroy()
+	end)
 end
 
 --------------------------------------------------------------------------------
@@ -884,14 +1498,17 @@ local function bindDrag(obj, onBegin, onMove, onEnd)
 end
 
 --- Stand-in shown while a window is dragged (ported from Airflow UI's drag skeleton).
---- Returns the frame and a fade() that dissolves it.
+--- `size` / `topLeft` are in layer units (the DragLayer scales with the rest of the UI). The stand-in is
+--- centre-anchored, so its pop-in grows around its middle, and it is moved with plain Position writes so it
+--- sits exactly under the cursor. Returns the frame, a fade() that dissolves it, and a place(topLeft) mover.
 local function makeSkeleton(size, topLeft, style)
-	local T = Library.Theme
+	local half = size / 2
 	local sk = New("Frame", {
 		Name = "DragSkeleton",
-		Position = UDim2.fromOffset(topLeft.X, topLeft.Y),
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromOffset(topLeft.X + half.X, topLeft.Y + half.Y),
 		Size = UDim2.fromOffset(size.X, size.Y),
-		BackgroundColor3 = style == "Ghost" and T.Background or T.Accent,
+		BackgroundColor3 = style == "Ghost" and "@Background" or "@Accent",
 		BackgroundTransparency = 1,
 		ZIndex = 5,
 		Parent = Library.DragLayer,
@@ -915,7 +1532,7 @@ local function makeSkeleton(size, topLeft, style)
 					AnchorPoint = spot,
 					Position = at,
 					Size = sz,
-					BackgroundColor3 = T.Accent,
+					BackgroundColor3 = "@Accent",
 					BackgroundTransparency = 1,
 					Parent = sk,
 				})
@@ -930,14 +1547,14 @@ local function makeSkeleton(size, topLeft, style)
 	elseif style == "Ghost" then
 		-- a see-through copy of the window's panel
 		part(sk, { BackgroundTransparency = 0.35 })
-		part(stroke(sk, T.Stroke, 1, 1), { Transparency = 0 })
+		part(stroke(sk, "@Stroke", 1, 1), { Transparency = 0 })
 	elseif style == "Frame" then
 		-- a single quiet line, nothing else
-		part(stroke(sk, T.Muted, 1, 1), { Transparency = 0 })
+		part(stroke(sk, "@Muted", 1, 1), { Transparency = 0 })
 	else
 		-- Outline: faint accent wash + outline + corner brackets
 		part(sk, { BackgroundTransparency = 0.92 })
-		part(stroke(sk, T.Accent, 1, 1), { Transparency = 0.2 })
+		part(stroke(sk, "@Accent", 1, 1), { Transparency = 0.2 })
 		brackets(16, 6)
 	end
 
@@ -955,25 +1572,26 @@ local function makeSkeleton(size, topLeft, style)
 			sk:Destroy()
 		end)
 	end
-	return sk, fade
+	local function place(tl)
+		sk.Position = UDim2.fromOffset(tl.X + half.X, tl.Y + half.Y)
+	end
+	return sk, fade, place
 end
 
 --- Makes `handle` drag `target` around the screen (clamped so the header stays reachable).
 --- opts.Style overrides Library.DragStyle (HUD pieces pass "Lift"). The style decides the look:
----   skeleton styles : a stand-in chases the cursor, the window glides into place on release
+---   skeleton styles : a stand-in stays glued to the cursor, the window glides into place on release
 ---   "Lift"          : window glides after the cursor, pops up, shadow lifts, optional tilt
 ---   "Off"           : window follows the cursor 1:1
+--- All maths is in layer units (pointer pixels / Library scale), so it is exact at any UI scale.
 local function makeDraggable(handle, target, opts)
 	opts = opts or {}
-	local startPointer, startTL, basePos
+	local startPtr, startTL, basePos
 	local goal, cur = Vector2.zero, Vector2.zero
 	local held, moved, lifted = false, false, false
 	local mode = "Lift"
-	local loop, skeleton, fadeSkeleton, settle
+	local loop, skeleton, fadeSkeleton, placeSkeleton, settle
 
-	local function origin()
-		return Library.Gui and Library.Gui.AbsolutePosition or Vector2.zero
-	end
 	local function styleOf()
 		local s = opts.Style or Library.DragStyle or "Outline"
 		if not table.find(Library.DragStyles, s) then
@@ -987,7 +1605,7 @@ local function makeDraggable(handle, target, opts)
 	end
 	local function place(tl)
 		if skeleton then
-			skeleton.Position = UDim2.fromOffset(tl.X, tl.Y)
+			placeSkeleton(tl)
 		else
 			target.Position = posFor(tl)
 		end
@@ -996,9 +1614,12 @@ local function makeDraggable(handle, target, opts)
 		if not Library.KeepOnScreen then
 			return tl
 		end
-		local screen = Library.Gui and Library.Gui.AbsoluteSize or Vector2.new(1920, 1080)
-		local size = target.AbsoluteSize
-		return Vector2.new(clamp(tl.X, -size.X + 90, screen.X - 90), clamp(tl.Y, 0, screen.Y - 30))
+		local screen = screenUnits()
+		local size = target.AbsoluteSize / layerScale()
+		return Vector2.new(
+			clamp(tl.X, -size.X + 90, math.max(screen.X - 90, -size.X + 90)),
+			clamp(tl.Y, 0, math.max(screen.Y - 30, 0))
+		)
 	end
 	local function stopLoop()
 		if loop then
@@ -1034,9 +1655,10 @@ local function makeDraggable(handle, target, opts)
 			settle:Cancel()
 			settle = nil
 		end
+		target:SetAttribute("LumenMoved", true)
 		local useSkeleton = mode ~= "Lift" and mode ~= "Off" and Library.DragLayer ~= nil
 		if useSkeleton then
-			skeleton, fadeSkeleton = makeSkeleton(target.AbsoluteSize, startTL, mode)
+			skeleton, fadeSkeleton, placeSkeleton = makeSkeleton(target.AbsoluteSize / layerScale(), startTL, mode)
 			-- the real window dims a touch so the stand-in reads as "the thing you carry"
 			local sh = target:FindFirstChild("Shadow")
 			if sh and sh:IsA("ImageLabel") then
@@ -1046,18 +1668,17 @@ local function makeDraggable(handle, target, opts)
 			lift(true)
 		end
 
-		local k = mode == "Off" and 0 or (Library.DragSmoothing or 0)
-		if skeleton then
-			k *= 3 -- stand-ins stick closer to the cursor than a floaty window would
-		end
+		-- Only the floaty "Lift" style trails the cursor. Stand-ins and "Off" are placed exactly under it:
+		-- any smoothing there is what made the stand-in feel detached from the pointer.
+		local k = mode == "Lift" and (Library.DragSmoothing or 0) or 0
 		if k > 0 and not reducedMotion() then
-			local tilt = (mode == "Lift" and Library.DragTilt) or 0
+			local tilt = Library.DragTilt or 0
 			loop = RunService.RenderStepped:Connect(function(dt)
 				dt = math.min(dt, 0.05)
 				local prev = cur
 				cur = cur:Lerp(goal, 1 - math.exp(-k * dt))
 				place(cur)
-				if tilt > 0 and not skeleton then
+				if tilt > 0 then
 					local vx = (cur.X - prev.X) / math.max(dt, 0.001)
 					local want = clamp(vx * 0.0025, -tilt, tilt)
 					target.Rotation += (want - target.Rotation) * (1 - math.exp(-14 * dt))
@@ -1072,9 +1693,9 @@ local function makeDraggable(handle, target, opts)
 
 	local function endMove()
 		if skeleton then
-			local sk, fade = skeleton, fadeSkeleton
+			local fade = fadeSkeleton
 			stopLoop()
-			skeleton, fadeSkeleton = nil, nil
+			skeleton, fadeSkeleton, placeSkeleton = nil, nil, nil
 			-- the window glides into the spot the stand-in marked, with a tiny landing pop
 			settle = tween(target, { Position = posFor(goal) }, 0.38, Enum.EasingStyle.Quint)
 			fade()
@@ -1087,9 +1708,6 @@ local function makeDraggable(handle, target, opts)
 				sc.Scale = 0.985
 				tween(sc, { Scale = 1 }, 0.5, Enum.EasingStyle.Back)
 			end
-			if sk then
-				sk.Name = "DragSkeletonFading"
-			end
 		else
 			lift(false)
 		end
@@ -1100,16 +1718,17 @@ local function makeDraggable(handle, target, opts)
 			return false
 		end
 		stopLoop()
-		startPointer = Vector2.new(input.Position.X, input.Position.Y)
-		startTL = target.AbsolutePosition - origin()
+		startPtr = pointerPos(input)
+		startTL = (target.AbsolutePosition - guiOrigin()) / layerScale()
 		basePos = target.Position
 		goal, cur = startTL, startTL
 		held, moved = true, false
 		mode = styleOf()
 	end, function(input)
-		local d = Vector2.new(input.Position.X, input.Position.Y) - startPointer
+		local k = layerScale()
+		local d = (pointerPos(input) - startPtr) / k
 		if not moved then
-			if d.Magnitude < 3 then
+			if d.Magnitude * k < 3 then
 				return
 			end
 			moved = true
@@ -1132,25 +1751,28 @@ end
 --- The size follows the cursor through a critically damped spring (ported from Airflow UI):
 --- it glides after the pointer and eases to rest without overshooting.
 --- Returns { Grips = Frame, SetLocked(bool) }.  Growth is compensated for the holder's AnchorPoint
---- so the top-left corner stays put.
+--- so the top-left corner stays put, and sizes are tracked in layer units so resizing is exact at any
+--- UI scale. A window can never be dragged larger than the space left on screen.
 local function makeResizable(holder, opts)
 	opts = opts or {}
 	local minSize = opts.MinSize or Vector2.new(320, 220)
 	local grips = New("Frame", { Name = "Grips", Size = UDim2.fromScale(1, 1), ZIndex = 20, Parent = holder })
 	local state = { Grips = grips, Locked = false }
 
-	local startPointer, startSize, startPos
+	local startPtr, startSize, startPos, startTL
 	local goal, cur, vel = Vector2.zero, Vector2.zero, Vector2.zero
 	local held, loop = false, nil
 	local dirX, dirY = 0, 0
+	local own = 1
 
 	local function apply(sz)
 		local anchor = holder.AnchorPoint
 		local dS = sz - startSize
 		holder.Size = UDim2.fromOffset(sz.X, sz.Y)
+		-- position offsets live in layer units; the window's own pop scale only affects its size
 		holder.Position = UDim2.new(
-			startPos.X.Scale, startPos.X.Offset + anchor.X * dS.X,
-			startPos.Y.Scale, startPos.Y.Offset + anchor.Y * dS.Y
+			startPos.X.Scale, startPos.X.Offset + anchor.X * dS.X * own,
+			startPos.Y.Scale, startPos.Y.Offset + anchor.Y * dS.Y * own
 		)
 		if opts.OnResize then
 			opts.OnResize(sz)
@@ -1170,8 +1792,12 @@ local function makeResizable(holder, opts)
 			end
 			stopLoop()
 			dirX, dirY = dx, dy
-			startPointer = Vector2.new(input.Position.X, input.Position.Y)
-			startSize = holder.AbsoluteSize
+			local sc = holder:FindFirstChildOfClass("UIScale")
+			own = sc and math.max(sc.Scale, 0.01) or 1
+			local k = layerScale()
+			startPtr = pointerPos(input)
+			startSize = holder.AbsoluteSize / (k * own)
+			startTL = (holder.AbsolutePosition - guiOrigin()) / k
 			startPos = holder.Position
 			goal, cur, vel = startSize, startSize, Vector2.zero
 			held = true
@@ -1192,11 +1818,17 @@ local function makeResizable(holder, opts)
 				end)
 			end
 		end, function(input)
-			local d = Vector2.new(input.Position.X, input.Position.Y) - startPointer
-			local screen = Library.Gui and Library.Gui.AbsoluteSize or Vector2.new(1920, 1080)
+			local k = layerScale()
+			local d = (pointerPos(input) - startPtr) / (k * own)
+			-- never grow past the screen edge (right / bottom) or beyond the whole screen
+			local avail = screenUnits()
+			local roomX = (avail.X - startTL.X - 8) / own
+			local roomY = (avail.Y - startTL.Y - 8) / own
+			local maxX = math.max(minSize.X, math.min(roomX, (avail.X - 16) / own))
+			local maxY = math.max(minSize.Y, math.min(roomY, (avail.Y - 16) / own))
 			goal = Vector2.new(
-				clamp(startSize.X + d.X * dirX, minSize.X, math.max(minSize.X, screen.X)),
-				clamp(startSize.Y + d.Y * dirY, minSize.Y, math.max(minSize.Y, screen.Y))
+				dirX ~= 0 and clamp(startSize.X + d.X * dirX, minSize.X, maxX) or startSize.X,
+				dirY ~= 0 and clamp(startSize.Y + d.Y * dirY, minSize.Y, maxY) or startSize.Y
 			)
 			if not loop then
 				apply(goal)
@@ -1329,7 +1961,23 @@ function Library:_setupInput()
 	end
 	self._inputReady = true
 
+	self:_global(UserInputService.InputChanged, function(input)
+		if input.UserInputType == TOUCH then
+			self._ptr = pointerPos(input)
+		end
+	end)
+
 	self:_global(UserInputService.InputBegan, function(input, processed)
+		if input.UserInputType == TOUCH then
+			self._lastTouch = true
+			self._ptr = pointerPos(input)
+		elseif input.UserInputType == MB1 then
+			self._lastTouch = false
+			if self._cursorRoot and self._cursorRoot.Visible then
+				tween(self._cursorPress, { Scale = 0.78 }, 0.08)
+				self:_cursorPulse()
+			end
+		end
 		if self._listening then
 			return
 		end
@@ -1352,6 +2000,9 @@ function Library:_setupInput()
 	end)
 
 	self:_global(UserInputService.InputEnded, function(input)
+		if input.UserInputType == MB1 and self._cursorPress then
+			tween(self._cursorPress, { Scale = 1 }, 0.3, Enum.EasingStyle.Back)
+		end
 		for kb in self._keybinds do
 			local key = kb.Key
 			if kb.Down and key and (input.KeyCode == key or input.UserInputType == key) then
@@ -1387,6 +2038,7 @@ function Library:ToggleUI(state)
 	self._uiGen = (self._uiGen or 0) + 1
 	local gen = self._uiGen
 	self:_backdropShow(state)
+	self:_cursorRefresh()
 
 	if state then
 		self.WindowLayer.Visible = true
@@ -1598,7 +2250,7 @@ function Library:CreateDock(opts)
 	local frame = New("Frame", {
 		Name = "Dock",
 		AnchorPoint = Vector2.new(0.5, 0),
-		Position = opts.Position or UDim2.new(0.5, 0, 0, GuiService:GetGuiInset().Y + 12),
+		Position = opts.Position or UDim2.new(0.5, 0, 0, 12),
 		Size = UDim2.fromOffset(0, 44),
 		AutomaticSize = Enum.AutomaticSize.X,
 		BackgroundColor3 = "@Background",
@@ -1609,6 +2261,19 @@ function Library:CreateDock(opts)
 	stroke(frame, "@Stroke", 1, 0.2)
 	pad(frame, 6, 6, 6, 6)
 	list(frame, 6, Enum.FillDirection.Horizontal, nil, Enum.VerticalAlignment.Center)
+	if not opts.Position then
+		self:_track(frame, function(f)
+			f.Position = UDim2.new(0.5, 0, 0, self:_topInset() + 12)
+		end)
+	end
+	-- a long dock shrinks to fit narrow screens instead of running off both edges
+	local fit = New("UIScale", { Name = "Fit", Parent = frame })
+	local function refit()
+		local avail = screenUnits().X - 16
+		local width = frame.AbsoluteSize.X / (layerScale() * fit.Scale)
+		fit.Scale = width > avail and math.max(avail / width, 0.4) or 1
+	end
+	frame:GetPropertyChangedSignal("AbsoluteSize"):Connect(refit)
 
 	local dock = { Instance = frame, Items = {} }
 
@@ -1631,7 +2296,7 @@ function Library:CreateDock(opts)
 		})
 		corner(btn, 6)
 		local pop = New("UIScale", { Parent = btn })
-		local ic = icon(btn, item.Icon or "layout-grid", 17, Library.Theme.SubText, {
+		local ic = icon(btn, item.Icon or "layout-grid", 17, "@SubText", {
 			AnchorPoint = Vector2.new(0.5, 0.5),
 			Position = UDim2.fromScale(0.5, 0.5),
 		})
@@ -1751,20 +2416,30 @@ function Library:_attachTooltip(gui, text)
 		})
 		self._tip = tip
 	end
+	-- everything in layer units: the tooltip layer is scaled like the rest of the UI
 	local function move(p)
-		local screen = self.Gui.AbsoluteSize
-		local size = tip.AbsoluteSize
-		local x = clamp(p.X + 14, 4, screen.X - size.X - 4)
-		local y = clamp(p.Y + 18, 4, screen.Y - size.Y - 4)
-		tip.Position = UDim2.fromOffset(x, y)
+		local k = layerScale()
+		local screen = screenUnits()
+		local size = tip.AbsoluteSize / k
+		local o = guiOrigin()
+		local px, py = (p.X - o.X) / k, (p.Y - o.Y) / k
+		local x = px + 14
+		if x + size.X + 4 > screen.X then
+			x = px - size.X - 10 -- flip to the left of the cursor
+		end
+		local y = py + 18
+		if y + size.Y + 4 > screen.Y then
+			y = py - size.Y - 10 -- flip above the cursor
+		end
+		tip.Position = UDim2.fromOffset(clamp(x, 4, math.max(4, screen.X - size.X - 4)), clamp(y, 4, math.max(4, screen.Y - size.Y - 4)))
 	end
 	gui.MouseEnter:Connect(function()
 		tip.Text.Text = text
 		tip.Visible = true
-		move(UserInputService:GetMouseLocation())
+		move(currentPointer())
 	end)
 	gui.MouseMoved:Connect(function()
-		move(UserInputService:GetMouseLocation())
+		move(currentPointer())
 	end)
 	gui.MouseLeave:Connect(function()
 		tip.Visible = false
@@ -1793,10 +2468,17 @@ function Library:Notify(opts)
 		self._toastHolder = New("Frame", {
 			Name = "ToastHolder",
 			AnchorPoint = Vector2.new(1, 0),
-			Position = UDim2.new(1, -14, 0, GuiService:GetGuiInset().Y + 10),
-			Size = UDim2.new(0, 290, 1, -80),
+			Position = UDim2.new(1, -14, 0, 10),
+			Size = UDim2.new(1, -28, 1, -80),
 			Parent = self.ToastLayer,
 		})
+		-- full width on narrow screens, never wider than 290
+		New("UISizeConstraint", { MaxSize = Vector2.new(290, 100000), Parent = self._toastHolder })
+		self:_track(self._toastHolder, function(f)
+			local inset = self:_topInset()
+			f.Position = UDim2.new(1, -14, 0, inset + 10)
+			f.Size = UDim2.new(1, -28, 1, -(inset + 30))
+		end)
 		list(self._toastHolder, 8, nil, Enum.HorizontalAlignment.Right)
 		self._toasts = {}
 	end
@@ -1813,7 +2495,7 @@ function Library:Notify(opts)
 
 	local holder = New("Frame", {
 		Name = "Toast",
-		Size = UDim2.fromOffset(290, 0),
+		Size = UDim2.new(1, 0, 0, 0),
 		AutomaticSize = Enum.AutomaticSize.Y,
 		Parent = self._toastHolder,
 	})
@@ -1900,8 +2582,8 @@ function Library:Notify(opts)
 				return
 			end
 			holder.AutomaticSize = Enum.AutomaticSize.None
-			holder.Size = UDim2.fromOffset(290, holder.AbsoluteSize.Y)
-			local tw = tween(holder, { Size = UDim2.fromOffset(290, 0) }, 0.15)
+			holder.Size = UDim2.new(1, 0, 0, holder.AbsoluteSize.Y / layerScale())
+			local tw = tween(holder, { Size = UDim2.new(1, 0, 0, 0) }, 0.15)
 			tw.Completed:Wait()
 			holder:Destroy()
 		end)
@@ -1998,6 +2680,12 @@ function Library:Unload()
 		return
 	end
 	self.Unloaded = true
+	if self._prevIcon ~= nil then
+		pcall(function()
+			UserInputService.MouseIconEnabled = self._prevIcon
+		end)
+		self._prevIcon = nil
+	end
 	if themeDriver then
 		themeDriver:Disconnect()
 		themeDriver = nil
@@ -2264,6 +2952,28 @@ local function newPickerGroup(panelsFrame)
 	return { Panels = panelsFrame, Pickers = {} }
 end
 
+-- Recently used colours, shared by every picker (newest first)
+Library._recent = {}
+Library._recentSync = setmetatable({}, { __mode = "k" })
+
+function Library:_pushRecent(c)
+	local hx = toHex(c)
+	for i = #self._recent, 1, -1 do
+		if toHex(self._recent[i]) == hx then
+			table.remove(self._recent, i)
+		end
+	end
+	table.insert(self._recent, 1, c)
+	while #self._recent > 8 do
+		table.remove(self._recent)
+	end
+	for picker in self._recentSync do
+		if picker._buildRecent then
+			pcall(picker._buildRecent)
+		end
+	end
+end
+
 function Library:_makeColorPicker(opts, swatchParent, group)
 	if typeof(opts) == "Color3" then
 		opts = { Default = opts }
@@ -2293,8 +3003,9 @@ function Library:_makeColorPicker(opts, swatchParent, group)
 	picker.Instance = swatch
 
 	local hasAlpha = opts.Alpha == true
-	local hexY = hasAlpha and 124 or 106
-	local innerH = hexY + 22
+	-- every row has a fixed height, so the open height is known up front
+	local SV_H, BAR_H, ROW_H, RECENT_H, GAP = 100, 12, 22, 18, 6
+	local innerH = SV_H + GAP + BAR_H + (hasAlpha and (GAP + BAR_H) or 0) + GAP + ROW_H + GAP + ROW_H + GAP + RECENT_H
 	local panelH = innerH + 16
 
 	local panel = New("Frame", {
@@ -2315,93 +3026,139 @@ function Library:_makeColorPicker(opts, swatchParent, group)
 		Size = UDim2.new(1, -16, 0, innerH),
 		Parent = panel,
 	})
+	list(inner, GAP)
 
-	-- saturation / value square
+	-- saturation / value square. The rounded, clipped square and the knob are siblings: the knob is NOT
+	-- clipped, so it stays a full circle exactly under the cursor even in the corners / on the edges.
+	local svWrap = New("Frame", { Size = UDim2.new(1, 0, 0, SV_H), LayoutOrder = 1, Parent = inner })
 	local sv = New("Frame", {
-		Size = UDim2.new(1, 0, 0, 80),
+		Size = UDim2.fromScale(1, 1),
 		BackgroundColor3 = Color3.fromHSV(h, 1, 1),
 		BackgroundTransparency = 0,
 		ClipsDescendants = true,
-		Parent = inner,
+		Parent = svWrap,
 	})
-	corner(sv, 4)
+	corner(sv, 5)
 	local white = New("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = Color3.new(1, 1, 1), BackgroundTransparency = 0, Parent = sv })
 	New("UIGradient", { Transparency = NumberSequence.new(0, 1), Parent = white })
 	local black = New("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = Color3.new(0, 0, 0), BackgroundTransparency = 0, Parent = sv })
 	New("UIGradient", { Rotation = 90, Transparency = NumberSequence.new(1, 0), Parent = black })
+	stroke(svWrap, "@Stroke", 1, 0.5)
 	local svKnob = New("Frame", {
 		AnchorPoint = Vector2.new(0.5, 0.5),
-		Size = UDim2.fromOffset(10, 10),
-		BackgroundColor3 = Color3.new(1, 1, 1),
-		BackgroundTransparency = 1,
-		Parent = sv,
+		Position = UDim2.fromScale(s, 1 - v),
+		Size = UDim2.fromOffset(14, 14),
+		BackgroundColor3 = default,
+		BackgroundTransparency = 0,
+		ZIndex = 4,
+		Parent = svWrap,
 	})
-	corner(svKnob, 5)
+	corner(svKnob, 7)
 	New("UIStroke", { Color = Color3.new(1, 1, 1), Thickness = 2, Parent = svKnob })
-	local svHit = New("TextButton", { Size = UDim2.fromScale(1, 1), ZIndex = 3, Parent = sv })
+	local svHit = New("TextButton", { Size = UDim2.fromScale(1, 1), ZIndex = 5, Parent = svWrap })
 
 	-- hue bar
-	local hue = New("Frame", {
-		Position = UDim2.fromOffset(0, 88),
-		Size = UDim2.new(1, 0, 0, 10),
-		BackgroundColor3 = Color3.new(1, 1, 1),
-		BackgroundTransparency = 0,
-		Parent = inner,
-	})
-	corner(hue, 5)
+	local hueWrap = New("Frame", { Size = UDim2.new(1, 0, 0, BAR_H), LayoutOrder = 2, Parent = inner })
+	local hue = New("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = Color3.new(1, 1, 1), BackgroundTransparency = 0, Parent = hueWrap })
+	corner(hue, 6)
 	New("UIGradient", { Color = RAINBOW, Parent = hue })
 	local hueKnob = New("Frame", {
 		AnchorPoint = Vector2.new(0.5, 0.5),
-		Size = UDim2.fromOffset(6, 14),
+		Size = UDim2.fromOffset(8, 16),
 		Position = UDim2.fromScale(h, 0.5),
 		BackgroundColor3 = Color3.new(1, 1, 1),
 		BackgroundTransparency = 0,
-		Parent = hue,
+		ZIndex = 3,
+		Parent = hueWrap,
 	})
-	corner(hueKnob, 3)
-	stroke(hueKnob, Color3.new(0, 0, 0), 1, 0.4)
-	local hueHit = New("TextButton", { Size = UDim2.new(1, 0, 1, 8), Position = UDim2.fromOffset(0, -4), ZIndex = 3, Parent = hue })
+	corner(hueKnob, 4)
+	stroke(hueKnob, Color3.new(0, 0, 0), 1, 0.35)
+	local hueHit = New("TextButton", { Position = UDim2.fromOffset(0, -4), Size = UDim2.new(1, 0, 1, 8), ZIndex = 4, Parent = hueWrap })
 
 	-- alpha bar (optional)
 	local alphaBar, alphaKnob, alphaHit
 	if hasAlpha then
+		local alphaWrap = New("Frame", { Size = UDim2.new(1, 0, 0, BAR_H), LayoutOrder = 3, Parent = inner })
 		alphaBar = New("Frame", {
-			Position = UDim2.fromOffset(0, 106),
-			Size = UDim2.new(1, 0, 0, 10),
+			Size = UDim2.fromScale(1, 1),
 			BackgroundColor3 = default,
 			BackgroundTransparency = 0,
-			Parent = inner,
+			Parent = alphaWrap,
 		})
-		corner(alphaBar, 5)
+		corner(alphaBar, 6)
 		New("UIGradient", { Transparency = NumberSequence.new(0, 0.92), Parent = alphaBar })
 		stroke(alphaBar, "@Stroke", 1, 0.4)
 		alphaKnob = New("Frame", {
 			AnchorPoint = Vector2.new(0.5, 0.5),
-			Size = UDim2.fromOffset(6, 14),
+			Size = UDim2.fromOffset(8, 16),
 			Position = UDim2.fromScale(picker.Transparency, 0.5),
 			BackgroundColor3 = Color3.new(1, 1, 1),
 			BackgroundTransparency = 0,
-			Parent = alphaBar,
+			ZIndex = 3,
+			Parent = alphaWrap,
 		})
-		corner(alphaKnob, 3)
-		stroke(alphaKnob, Color3.new(0, 0, 0), 1, 0.4)
-		alphaHit = New("TextButton", { Size = UDim2.new(1, 0, 1, 8), Position = UDim2.fromOffset(0, -4), ZIndex = 3, Parent = alphaBar })
+		corner(alphaKnob, 4)
+		stroke(alphaKnob, Color3.new(0, 0, 0), 1, 0.35)
+		alphaHit = New("TextButton", { Position = UDim2.fromOffset(0, -4), Size = UDim2.new(1, 0, 1, 8), ZIndex = 4, Parent = alphaWrap })
 	end
 
-	-- hex input
-	local hexBox = New("TextBox", {
-		Position = UDim2.fromOffset(0, hexY),
-		Size = UDim2.new(1, 0, 0, 22),
+	local function smallBox(parent, size, placeholder)
+		local tb = New("TextBox", {
+			Size = size,
+			BackgroundColor3 = "@Panel",
+			BackgroundTransparency = 0,
+			Text = "",
+			PlaceholderText = placeholder,
+			PlaceholderColor3 = "@Muted",
+			ClearTextOnFocus = false,
+			TextSize = 11,
+			Parent = parent,
+		})
+		corner(tb, 4)
+		stroke(tb, "@Stroke", 1, 0.3)
+		return tb
+	end
+
+	-- hex input + copy
+	local hexRow = New("Frame", { Size = UDim2.new(1, 0, 0, ROW_H), LayoutOrder = 4, Parent = inner })
+	list(hexRow, GAP, Enum.FillDirection.Horizontal)
+	local hexBox = smallBox(hexRow, UDim2.new(1, -(44 + GAP), 1, 0), "#RRGGBB")
+	hexBox.Text = toHex(default)
+	local copyBtn = New("TextButton", {
+		Size = UDim2.fromOffset(44, ROW_H),
 		BackgroundColor3 = "@Panel",
 		BackgroundTransparency = 0,
-		Text = toHex(default),
-		PlaceholderText = "#RRGGBB",
-		ClearTextOnFocus = false,
-		TextSize = 11,
-		Parent = inner,
+		Text = "Copy",
+		TextSize = 10,
+		FontFace = FONT_SEMI,
+		TextColor3 = "@SubText",
+		LayoutOrder = 2,
+		Parent = hexRow,
 	})
-	corner(hexBox, 4)
-	stroke(hexBox, "@Stroke", 1, 0.3)
+	corner(copyBtn, 4)
+	stroke(copyBtn, "@Stroke", 1, 0.3)
+
+	-- R / G / B inputs
+	local rgbRow = New("Frame", { Size = UDim2.new(1, 0, 0, ROW_H), LayoutOrder = 5, Parent = inner })
+	list(rgbRow, GAP, Enum.FillDirection.Horizontal)
+	local rgbBoxes = {}
+	for i, name in { "R", "G", "B" } do
+		local tb = smallBox(rgbRow, UDim2.new(1 / 3, -4, 1, 0), name)
+		tb.LayoutOrder = i
+		rgbBoxes[i] = tb
+	end
+
+	-- recently used colours
+	local recentRow = New("Frame", { Size = UDim2.new(1, 0, 0, RECENT_H), LayoutOrder = 6, Parent = inner })
+	list(recentRow, 4, Enum.FillDirection.Horizontal, nil, Enum.VerticalAlignment.Center)
+	local recentHint = New("TextLabel", {
+		Size = UDim2.new(1, 0, 1, 0),
+		Text = "recent colors show up here",
+		TextSize = 10,
+		TextColor3 = "@Muted",
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Parent = recentRow,
+	})
 
 	local function render()
 		local c = Color3.fromHSV(h, s, v)
@@ -2409,6 +3166,7 @@ function Library:_makeColorPicker(opts, swatchParent, group)
 		swatch.BackgroundColor3 = c
 		sv.BackgroundColor3 = Color3.fromHSV(h, 1, 1)
 		svKnob.Position = UDim2.fromScale(s, 1 - v)
+		svKnob.BackgroundColor3 = c
 		hueKnob.Position = UDim2.fromScale(h, 0.5)
 		if alphaBar then
 			alphaBar.BackgroundColor3 = c
@@ -2416,6 +3174,12 @@ function Library:_makeColorPicker(opts, swatchParent, group)
 		end
 		if not hexBox:IsFocused() then
 			hexBox.Text = toHex(c)
+		end
+		local rgb = { c.R, c.G, c.B }
+		for i, tb in rgbBoxes do
+			if not tb:IsFocused() then
+				tb.Text = tostring(math.floor(rgb[i] * 255 + 0.5))
+			end
 		end
 		swatch.BackgroundTransparency = hasAlpha and picker.Transparency * 0.85 or 0
 	end
@@ -2425,6 +3189,44 @@ function Library:_makeColorPicker(opts, swatchParent, group)
 		emit(picker, picker.Transparency)
 	end
 
+	-- keeps the hue when the new colour has no hue of its own (greys / black)
+	local function setFromColor(c)
+		local nh, ns, nv = c:ToHSV()
+		if ns > 0.001 and nv > 0.001 then
+			h = nh
+		end
+		s, v = ns, nv
+	end
+
+	local function buildRecent()
+		for _, child in recentRow:GetChildren() do
+			if child:IsA("TextButton") then
+				child:Destroy()
+			end
+		end
+		recentHint.Visible = #Library._recent == 0
+		for i, col in Library._recent do
+			local b = New("TextButton", {
+				Size = UDim2.fromOffset(18, 18),
+				BackgroundColor3 = col,
+				BackgroundTransparency = 0,
+				LayoutOrder = i,
+				Parent = recentRow,
+			})
+			corner(b, 4)
+			stroke(b, "@Stroke", 1, 0.2)
+			b.Activated:Connect(function()
+				setFromColor(col)
+				changed()
+			end)
+		end
+	end
+	picker._buildRecent = buildRecent
+	Library._recentSync[picker] = true
+	buildRecent()
+
+	-- Pointer maths: the knob sits at (pointer - top-left) / size of the hit area, so it is pinned to the
+	-- cursor at any window / UI scale (both numbers are in screen pixels).
 	local function relX(gui, input)
 		local p = pointerPos(input)
 		return clamp((p.X - gui.AbsolutePosition.X) / math.max(gui.AbsoluteSize.X, 1), 0, 1)
@@ -2435,12 +3237,15 @@ function Library:_makeColorPicker(opts, swatchParent, group)
 		v = 1 - clamp((p.Y - sv.AbsolutePosition.Y) / math.max(sv.AbsoluteSize.Y, 1), 0, 1)
 		changed()
 	end
-	bindDrag(svHit, updateSV, updateSV)
+	local function commit()
+		Library:_pushRecent(picker.Value)
+	end
+	bindDrag(svHit, updateSV, updateSV, commit)
 	local function updateHue(input)
 		h = relX(hue, input)
 		changed()
 	end
-	bindDrag(hueHit, updateHue, updateHue)
+	bindDrag(hueHit, updateHue, updateHue, commit)
 	if alphaHit then
 		local function updateAlpha(input)
 			picker.Transparency = snap(relX(alphaBar, input), 0.01, 0)
@@ -2452,16 +3257,41 @@ function Library:_makeColorPicker(opts, swatchParent, group)
 	hexBox.FocusLost:Connect(function()
 		local c = fromHex(hexBox.Text)
 		if c then
-			h, s, v = c:ToHSV()
+			setFromColor(c)
 			changed()
+			commit()
 		else
 			render()
+		end
+	end)
+	for i, tb in rgbBoxes do
+		tb.FocusLost:Connect(function()
+			local n = tonumber(tb.Text)
+			if n then
+				local c = picker.Value
+				local rgb = { math.floor(c.R * 255 + 0.5), math.floor(c.G * 255 + 0.5), math.floor(c.B * 255 + 0.5) }
+				rgb[i] = clamp(math.floor(n + 0.5), 0, 255)
+				setFromColor(Color3.fromRGB(rgb[1], rgb[2], rgb[3]))
+				changed()
+				commit()
+			else
+				render()
+			end
+		end)
+	end
+	copyBtn.Activated:Connect(function()
+		local hx = toHex(picker.Value)
+		if setclipboard then
+			pcall(setclipboard, hx)
+			Library:Notify({ Title = "Color copied", Content = hx, Duration = 1.5 })
+		else
+			hexBox:CaptureFocus()
 		end
 	end)
 
 	function picker:Set(color, transparency, silent)
 		if typeof(color) == "Color3" then
-			h, s, v = color:ToHSV()
+			setFromColor(color)
 		end
 		if transparency then
 			self.Transparency = transparency
@@ -2512,6 +3342,9 @@ function Library:_makeColorPicker(opts, swatchParent, group)
 	end
 	picker._deserialize = function(self, data)
 		self:Set(data.Color, data.Transparency)
+	end
+	picker._cleanup = function()
+		Library._recentSync[picker] = nil
 	end
 
 	swatch.Activated:Connect(function()
@@ -2663,6 +3496,7 @@ function Container:AddButton(opts)
 			Size = hasSub and UDim2.new(0.5, -3, 1, 0) or UDim2.new(1, 0, 1, 0),
 			BackgroundTransparency = 0,
 			Text = o.Name or "Button",
+			TextTruncate = Enum.TextTruncate.AtEnd,
 			FontFace = FONT_SEMI,
 			TextSize = 12,
 			ClipsDescendants = true,
@@ -3226,7 +4060,7 @@ function Container:AddDropdown(opts)
 			Size = UDim2.new(1, -16, 1, 0),
 			Text = "",
 			PlaceholderText = "Search...",
-			PlaceholderColor3 = Library.Theme.Muted,
+			PlaceholderColor3 = "@Muted",
 			ClearTextOnFocus = false,
 			TextSize = 11,
 			TextXAlignment = Enum.TextXAlignment.Left,
@@ -3277,7 +4111,7 @@ function Container:AddDropdown(opts)
 		end
 		current.Text = txt
 		local has = (multi and #obj.Value > 0) or (not multi and obj.Value ~= nil)
-		current.TextColor3 = has and Library.Theme.Text or Library.Theme.SubText
+		setProp(current, "TextColor3", has and "@Text" or "@SubText")
 	end
 
 	local function listHeight()
@@ -3507,7 +4341,7 @@ function Container:AddTextbox(opts)
 		Size = UDim2.new(1, -20, 1, multiline and -12 or 0),
 		Text = tostring(opts.Default or ""),
 		PlaceholderText = opts.Placeholder or "",
-		PlaceholderColor3 = Library.Theme.Muted,
+		PlaceholderColor3 = "@Muted",
 		ClearTextOnFocus = false,
 		MultiLine = multiline,
 		TextWrapped = multiline,
@@ -4576,6 +5410,11 @@ function Library:CreateKeybindList(opts)
 	for id in self._listed do
 		obj:_refresh(id)
 	end
+	Library:_onTheme(function()
+		for id in Library._listed do
+			obj:_refresh(id)
+		end
+	end)
 	return obj
 end
 
@@ -4588,7 +5427,7 @@ function Library:CreateWatermark(opts)
 	self:_Gui()
 	local frame = New("Frame", {
 		Name = "Watermark",
-		Position = opts.Position or UDim2.fromOffset(16, GuiService:GetGuiInset().Y + 10),
+		Position = opts.Position or UDim2.fromOffset(16, 10),
 		Size = UDim2.fromOffset(0, 30),
 		AutomaticSize = Enum.AutomaticSize.X,
 		BackgroundColor3 = "@Background",
@@ -4664,6 +5503,12 @@ function Library:CreateWatermark(opts)
 		frame.Visible = v
 	end
 	makeDraggable(frame, frame, { Style = "Lift" })
+	if not opts.Position then
+		self:_track(frame, function(f)
+			f.Position = UDim2.fromOffset(16, self:_topInset() + 10)
+		end)
+	end
+	Library:_onTheme(render) -- colours are baked into the rich text
 	render()
 	return obj
 end
@@ -4694,7 +5539,15 @@ function Section:CreateSubTab(opts)
 		opts = { Name = opts }
 	end
 	if not self._bar then
-		self._bar = New("Frame", { Size = UDim2.new(1, 0, 0, 24), LayoutOrder = 1, Parent = self.Card })
+		self._bar = New("ScrollingFrame", {
+			Size = UDim2.new(1, 0, 0, 24),
+			CanvasSize = UDim2.new(),
+			AutomaticCanvasSize = Enum.AutomaticSize.X,
+			ScrollBarThickness = 0,
+			ScrollingDirection = Enum.ScrollingDirection.X,
+			LayoutOrder = 1,
+			Parent = self.Card,
+		})
 		list(self._bar, 4, Enum.FillDirection.Horizontal, nil, Enum.VerticalAlignment.Center)
 		self._pages = New("Frame", {
 			Size = UDim2.new(1, 0, 0, 0),
@@ -4995,11 +5848,16 @@ local function controlButton(parent, iconName, callback, hoverKey, order)
 	b.MouseEnter:Connect(function()
 		tween(b, { BackgroundTransparency = 0.3 }, 0.1)
 		if hoverKey then
-			b.BackgroundColor3 = Library.Theme[hoverKey]
+			setProp(b, "BackgroundColor3", "@" .. hoverKey)
 		end
 	end)
 	b.MouseLeave:Connect(function()
 		tween(b, { BackgroundTransparency = 1 }, 0.1)
+		if hoverKey then
+			task.delay(0.12, function()
+				setProp(b, "BackgroundColor3", "@ElementHover")
+			end)
+		end
 	end)
 	b.Activated:Connect(callback)
 	return b
@@ -5214,6 +6072,7 @@ local function holderParts(holder)
 end
 
 function Library._playIn(holder)
+	Library:_constrainSoon(holder)
 	local veil, sc, sh = holderParts(holder)
 	if not Library.WindowAnimation or reducedMotion() or not (veil and sc) then
 		if veil then
@@ -5309,7 +6168,7 @@ function Library:CreateWindow(opts)
 	local headerH = sidebar and 54 or 42
 	local header = New("Frame", { Name = "Header", Size = UDim2.new(1, 0, 0, headerH), Parent = main })
 	pad(header, 14, 0, 10, 0)
-	local left = New("Frame", { Size = UDim2.new(0.75, 0, 1, 0), Parent = header })
+	local left = New("Frame", { Size = UDim2.new(0.75, 0, 1, 0), ClipsDescendants = true, Parent = header })
 	list(left, 8, Enum.FillDirection.Horizontal, nil, Enum.VerticalAlignment.Center)
 	if opts.Icon then
 		icon(left, opts.Icon, sidebar and 28 or 16, "@Accent", { LayoutOrder = 0 })
@@ -5329,7 +6188,8 @@ function Library:CreateWindow(opts)
 	local right = New("Frame", {
 		AnchorPoint = Vector2.new(1, 0),
 		Position = UDim2.fromScale(1, 0),
-		Size = UDim2.new(sidebar and 0.25 or 0.35, 0, 1, 0),
+		Size = UDim2.new(0, 0, 1, 0),
+		AutomaticSize = Enum.AutomaticSize.X,
 		Parent = header,
 	})
 	list(right, 6, Enum.FillDirection.Horizontal, Enum.HorizontalAlignment.Right, Enum.VerticalAlignment.Center)
@@ -5354,6 +6214,25 @@ function Library:CreateWindow(opts)
 		safeCall(window.OnClose)
 	end, "Danger", 3)
 	makeDraggable(header, holder)
+
+	-- the title area takes whatever the control buttons / subtitle leave free (no more overlap)
+	local function fitHeader()
+		left.Size = UDim2.new(1, -(right.AbsoluteSize.X / scaleOf(right) + 10), 1, 0)
+		if window._subtitle then
+			window._subtitle.Visible = holder.AbsoluteSize.X / scaleOf(holder) >= 440
+		end
+	end
+	right:GetPropertyChangedSignal("AbsoluteSize"):Connect(fitHeader)
+	holder:GetPropertyChangedSignal("AbsoluteSize"):Connect(fitHeader)
+	self:_register(holder, {
+		State = function()
+			return window._minimized and "min" or nil
+		end,
+		OnSize = function(v)
+			window._size = UDim2.fromOffset(v.X, v.Y)
+		end,
+	})
+	self:_constrainSoon(holder, true)
 	if opts.Resizable ~= false and Library.Resizable then
 		window._resize = makeResizable(holder, {
 			MinSize = opts.MinSize or Vector2.new(sidebar and 440 or 380, 260),
@@ -5716,7 +6595,7 @@ function Window:CreateTab(opts)
 		LayoutOrder = 2,
 		Parent = scroll,
 	})
-	list(columns, 8, Enum.FillDirection.Horizontal)
+	local columnsLayout = list(columns, 8, Enum.FillDirection.Horizontal)
 	local function column(order)
 		local c = New("Frame", {
 			Size = UDim2.new(0.5, -4, 0, 0),
@@ -5732,6 +6611,24 @@ function Window:CreateTab(opts)
 	tab.Full = full
 	tab.Left = column(1)
 	tab.Right = column(2)
+	-- narrow window (phones / small scale): stack the two columns instead of squeezing them
+	local stacked = false
+	local function relayout()
+		local w = columns.AbsoluteSize.X / scaleOf(columns)
+		if w <= 0 then
+			return
+		end
+		local want = w < 430
+		if want == stacked then
+			return
+		end
+		stacked = want
+		columnsLayout.FillDirection = want and Enum.FillDirection.Vertical or Enum.FillDirection.Horizontal
+		local sz = want and UDim2.new(1, 0, 0, 0) or UDim2.new(0.5, -4, 0, 0)
+		tab.Left.Size = sz
+		tab.Right.Size = sz
+	end
+	columns:GetPropertyChangedSignal("AbsoluteSize"):Connect(relayout)
 
 	table.insert(self.Tabs, tab)
 	if opts.Warning then
@@ -5822,6 +6719,11 @@ function Window:Minimize()
 	end
 	local target = self._minimized and UDim2.new(self._size.X.Scale, self._size.X.Offset, 0, 42) or self._size
 	tween(self.Instance, { Size = target }, 0.24, Enum.EasingStyle.Quint)
+	if not self._minimized then
+		task.delay(0.3, function()
+			Library:_constrain(self.Instance)
+		end)
+	end
 end
 
 function Window:Destroy()
@@ -5971,6 +6873,11 @@ function Library:CreateSubWindow(opts)
 		end
 		local target = self._minimized and UDim2.new(self._size.X.Scale, self._size.X.Offset, 0, HEADER) or self._size
 		tween(holder, { Size = target }, 0.22, Enum.EasingStyle.Quint)
+	if not self._minimized then
+		task.delay(0.28, function()
+			Library:_constrain(holder)
+		end)
+	end
 	end
 
 	function sw:Maximize()
@@ -6028,6 +6935,14 @@ function Library:CreateSubWindow(opts)
 		})
 	end
 
+	self:_register(holder, {
+		State = function()
+			return sw._maximized and "max" or (sw._minimized and "min" or nil)
+		end,
+		OnSize = function(v)
+			sw._size = UDim2.fromOffset(v.X, v.Y)
+		end,
+	})
 	table.insert(self.SubWindows, sw)
 	if opts.Visible then
 		sw:Open()
@@ -6215,6 +7130,7 @@ function Library:BuildThemeSection(container, opts)
 				t[k] = v
 			end
 		end
+		t.AccentLight = t.Accent:Lerp(Color3.new(1, 1, 1), 0.4)
 		return t
 	end
 
@@ -6244,7 +7160,9 @@ function Library:BuildThemeSection(container, opts)
 			Default = self.Theme[key],
 			Callback = function(c)
 				-- instant: a picker drag fires every frame, a fade would only lag behind it
+				self._themeFromUI = true
 				self:SetTheme({ [key] = c }, true)
+				self._themeFromUI = false
 			end,
 		})
 	end
@@ -6265,7 +7183,9 @@ function Library:BuildThemeSection(container, opts)
 		Default = self.Theme.BackgroundAngle,
 		Suffix = " deg",
 		Callback = function(v)
+			self._themeFromUI = true
 			self:SetTheme({ BackgroundAngle = v }, true)
+			self._themeFromUI = false
 		end,
 	})
 	container:AddToggle({
@@ -6325,6 +7245,58 @@ function Library:BuildThemeSection(container, opts)
 		end,
 	})
 
+	-- UI scale / auto-fit / cursor decoration
+	container:AddDivider()
+	local scaleOptions = { "60%", "75%", "90%", "100%", "110%", "125%", "150%", "175%", "200%" }
+	local curScale = string.format("%d%%", math.floor(self.Scale * 100 + 0.5))
+	container:AddDropdown({
+		Name = "UI scale",
+		Flag = "ui_scale",
+		Options = scaleOptions,
+		Default = table.find(scaleOptions, curScale) and curScale or "100%",
+		Callback = function(opt)
+			self:SetScale((tonumber((tostring(opt):gsub("%%", ""))) or 100) / 100)
+		end,
+	})
+	container:AddToggle({
+		Name = "Auto-fit to screen",
+		Flag = "ui_autoscale",
+		Default = self.AutoScale,
+		Tooltip = "Shrinks the UI on small screens / phones so nothing is cut off, and enlarges it on 4K.",
+		Callback = function(on)
+			self:SetAutoScale(on)
+		end,
+	})
+	container:AddToggle({
+		Name = "Cursor decoration",
+		Flag = "ui_cursor",
+		Default = self.Cursor.Enabled,
+		Callback = function(on)
+			self:SetCursor(on)
+		end,
+	})
+	container:AddDropdown({
+		Name = "Cursor style",
+		Flag = "ui_cursor_style",
+		Options = table.clone(self.CursorStyles),
+		Default = self.Cursor.Style,
+		Callback = function(style)
+			self:SetCursor({ Style = style })
+		end,
+	})
+	container:AddSlider({
+		Name = "Cursor size",
+		Flag = "ui_cursor_size",
+		Min = 12,
+		Max = 40,
+		Default = self.Cursor.Size,
+		Suffix = " px",
+		Callback = function(v)
+			self:SetCursor({ Size = v })
+		end,
+	})
+	container:AddDivider()
+
 	local function names()
 		local n = {}
 		for k in self.Themes do
@@ -6347,6 +7319,22 @@ function Library:BuildThemeSection(container, opts)
 			end
 		end,
 	})
+
+	-- keep the colour pickers / preset list in sync with themes applied from code (ImportTheme, SetTheme ...)
+	self.ThemeChanged:Connect(function()
+		if self._themeFromUI then
+			return
+		end
+		pcall(function()
+			for key, p in pickers do
+				p:Set(self.Theme[key], nil, true)
+			end
+			angle:Set(self.Theme.BackgroundAngle, true)
+			if self.ThemeName and dd.Value ~= self.ThemeName then
+				dd:Set(self.ThemeName, true)
+			end
+		end)
+	end)
 
 	container:AddButton({
 		Name = "Set as default",
@@ -6388,6 +7376,42 @@ function Library:BuildThemeSection(container, opts)
 			end
 			self:Notify({ Title = "Theme created", Content = n, Type = "Success" })
 		end,
+	})
+
+	container:AddButton({
+		Name = "Randomize accent",
+		Callback = function()
+			local hue = math.random()
+			self:SetTheme({
+				Accent = Color3.fromHSV(hue, 0.6, 1),
+				Accent2 = Color3.fromHSV((hue + 0.08) % 1, 0.7, 1),
+			})
+		end,
+	})
+	local themeBox = container:AddTextbox({ Name = "Theme string", Placeholder = "paste an exported theme...", FireOnBlur = false })
+	container:AddButton({
+		Name = "Export theme",
+		Callback = function()
+			local str = self:ExportTheme()
+			themeBox:Set(str, true)
+			if setclipboard then
+				setclipboard(str)
+				self:Notify({ Title = "Theme exported", Content = "Copied to clipboard.", Type = "Success" })
+			else
+				self:Notify({ Title = "Theme exported", Content = "Copy it from the text box.", Type = "Info" })
+			end
+		end,
+		SubButton = {
+			Name = "Import",
+			Callback = function()
+				local ok, err = self:ImportTheme(themeBox.TextBox.Text)
+				self:Notify({
+					Title = ok and "Theme imported" or "Import failed",
+					Content = ok and "Theme applied." or tostring(err),
+					Type = ok and "Success" or "Error",
+				})
+			end,
+		},
 	})
 end
 
